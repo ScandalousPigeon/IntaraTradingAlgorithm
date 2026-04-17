@@ -25,32 +25,14 @@ class Trader:
             # each OrderDepth contains two dicts: buy_orders and sell_orders, mapping price to quantity
             orders: List[Order] = []
             if product == "INTARIAN_PEPPER_ROOT":
-                orders += self.trade_pepper(order_depth, state.traderData)
+                orders += self.trade_pepper(order_depth, state.traderData, position)
             else:
-                orders += self.trade_osmium(order_depth, modifier)
+                orders += self.trade_osmium(order_depth, position, modifier)
 
             if state.traderData == "":
                 iteration = 0
             else:
                 iteration = int(state.traderData)
-
-            
-            """ Provided example code
-            acceptable_price = 10  # Participant should calculate this value
-            print("Acceptable price : " + str(acceptable_price))
-            print("Buy Order depth : " + str(len(order_depth.buy_orders)) + ", Sell order depth : " + str(len(order_depth.sell_orders)))
-    
-            if len(order_depth.sell_orders) != 0:
-                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
-                if int(best_ask) < acceptable_price:
-                    # print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
-    
-            if len(order_depth.buy_orders) != 0:
-                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
-                if int(best_bid) > acceptable_price:
-                    # print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))"""
             
             result[product] = orders
 
@@ -62,56 +44,65 @@ class Trader:
         conversions = 0
         return result, conversions, next_trader_data
     
-    def trade_osmium(self, order_depth, modifier):
-        """Helper method; to call inside run() when trading osmium."""
+    def trade_osmium(self, order_depth, position, modifier):
         result = []
-        
-        for price, qty in order_depth.buy_orders.items():
-            
+        LIMIT = 80
+
+        buy_room = LIMIT - position
+        sell_room = LIMIT + position
+
+        for price, qty in sorted(order_depth.buy_orders.items(), reverse=True):
+            if sell_room <= 0:
+                break
+
             if price >= 10001 + modifier:
-                # order_depth.buy_orders[price]
-                result.append(Order("ASH_COATED_OSMIUM", price, -qty))
-                
-        for price, qty in order_depth.sell_orders.items():
-            
+                sell_qty = min(qty, sell_room)   # qty in buy_orders is positive
+                result.append(Order("ASH_COATED_OSMIUM", price, -sell_qty))
+                sell_room -= sell_qty
+
+        for price, qty in sorted(order_depth.sell_orders.items()):
+            if buy_room <= 0:
+                break
+
             if price <= 9999 + modifier:
-                # order_depth.sell_orders[price]
-                result.append(Order("ASH_COATED_OSMIUM", price, -qty))
-        
-        
-            
+                ask_size = -qty                  # qty in sell_orders is negative
+                buy_qty = min(ask_size, buy_room)
+                result.append(Order("ASH_COATED_OSMIUM", price, buy_qty))
+                buy_room -= buy_qty
+
         return result
 
-    def trade_pepper(self, order_depth, iteration):
+    def trade_pepper(self, order_depth, iteration, position):
         result = []
-        
+        LIMIT = 80
+            
         if iteration == "":
-            buy_room = 8
-            for price, qty in order_depth.sell_orders.items():
+            buy_room = min(8, max(0, LIMIT - position))
+            for price, qty in sorted(order_depth.sell_orders.items()):
                 if buy_room <= 0:
                     break
-                available = -qty          # sell_orders qty is negative
+                available = -qty
                 buy_qty = min(available, buy_room)
                 result.append(Order("INTARIAN_PEPPER_ROOT", price, buy_qty))
                 buy_room -= buy_qty
 
-        elif int(iteration) < int("10"):
-            buy_room = 8
-            for price, qty in order_depth.sell_orders.items():
+        elif int(iteration) < 10:
+            buy_room = min(8, max(0, LIMIT - position))
+            for price, qty in sorted(order_depth.sell_orders.items()):
                 if buy_room <= 0:
                     break
-                available = -qty          # sell_orders qty is negative
+                available = -qty
                 buy_qty = min(available, buy_room)
-                result.append(Order("INTARIAN_PEPPER_ROOT", price, buy_qty)) # change to 10000
+                result.append(Order("INTARIAN_PEPPER_ROOT", price, buy_qty))
                 buy_room -= buy_qty
 
-        elif int(iteration) >= int("990"):
-            sell_qty_left = 8
-            for price, qty in order_depth.buy_orders.items():
+        elif int(iteration) >= 9990:
+            sell_qty_left = min(8, max(position, 0))
+            for price, qty in sorted(order_depth.buy_orders.items(), reverse=True):
                 if sell_qty_left <= 0:
                     break
                 sell_qty = min(qty, sell_qty_left)
                 result.append(Order("INTARIAN_PEPPER_ROOT", price, -sell_qty))
                 sell_qty_left -= sell_qty
-
+            
         return result
