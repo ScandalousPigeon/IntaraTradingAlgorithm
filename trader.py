@@ -19,15 +19,20 @@ class Trader:
         # Orders to be placed on exchange matching engine
         result = {}
         for product in state.order_depths:
-            # position = state.position[product]
+            position = state.position.get(product, 0)
+            modifier = 3 if position < -40 else -3 if position > 40 else 0
             order_depth: OrderDepth = state.order_depths[product] # order book
             # each OrderDepth contains two dicts: buy_orders and sell_orders, mapping price to quantity
             orders: List[Order] = []
             if product == "INTARIAN_PEPPER_ROOT":
-                orders += self.trade_pepper(order_depth)
+                orders += self.trade_pepper(order_depth, state.traderData)
             else:
-                orders += self.trade_osmium(order_depth)
+                orders += self.trade_osmium(order_depth, modifier)
 
+            if state.traderData == "":
+                iteration = 0
+            else:
+                iteration = int(state.traderData)
 
             
             """ Provided example code
@@ -52,37 +57,61 @@ class Trader:
         # You can place info you want to persist to the next TradingState in traderData, 
         # and access it from the next TradingState's traderData. It must be a string.
         # Although, idk what we would use it for
-        traderData = ""  # No state needed - we check position directly
+          # No state needed - we check position directly
+        next_trader_data = str(iteration + 1)
         conversions = 0
-        return result, conversions, traderData
+        return result, conversions, next_trader_data
     
-    def trade_osmium(self, order_depth):
+    def trade_osmium(self, order_depth, modifier):
         """Helper method; to call inside run() when trading osmium."""
         result = []
         
-        
-        
-        for price in order_depth.buy_orders:
+        for price, qty in order_depth.buy_orders.items():
             
-            if price >= 10001:
+            if price >= 10001 + modifier:
                 # order_depth.buy_orders[price]
-                result.append(Order("ASH_COATED_OSMIUM", price, -5))
+                result.append(Order("ASH_COATED_OSMIUM", price, -qty))
                 
-        for price in order_depth.sell_orders:
+        for price, qty in order_depth.sell_orders.items():
             
-            if price <= 9999:
+            if price <= 9999 + modifier:
                 # order_depth.sell_orders[price]
-                result.append(Order("ASH_COATED_OSMIUM", price, 5))
+                result.append(Order("ASH_COATED_OSMIUM", price, -qty))
+        
         
             
         return result
 
-    def trade_pepper(self, order_depth):
-        """Helper method; to call inside run() when trading pepper."""
+    def trade_pepper(self, order_depth, iteration):
         result = []
-        for price in order_depth.buy_orders:
-            pass
+        
+        if iteration == "":
+            buy_room = 8
+            for price, qty in order_depth.sell_orders.items():
+                if buy_room <= 0:
+                    break
+                available = -qty          # sell_orders qty is negative
+                buy_qty = min(available, buy_room)
+                result.append(Order("INTARIAN_PEPPER_ROOT", price, buy_qty))
+                buy_room -= buy_qty
 
-        for price in order_depth.sell_orders:
-            pass
+        elif int(iteration) < int("10"):
+            buy_room = 8
+            for price, qty in order_depth.sell_orders.items():
+                if buy_room <= 0:
+                    break
+                available = -qty          # sell_orders qty is negative
+                buy_qty = min(available, buy_room)
+                result.append(Order("INTARIAN_PEPPER_ROOT", price, buy_qty)) # change to 10000
+                buy_room -= buy_qty
+
+        elif int(iteration) >= int("990"):
+            sell_qty_left = 8
+            for price, qty in order_depth.buy_orders.items():
+                if sell_qty_left <= 0:
+                    break
+                sell_qty = min(qty, sell_qty_left)
+                result.append(Order("INTARIAN_PEPPER_ROOT", price, -sell_qty))
+                sell_qty_left -= sell_qty
+
         return result
