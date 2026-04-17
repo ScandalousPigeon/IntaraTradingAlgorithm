@@ -19,7 +19,7 @@ class Trader:
         # Orders to be placed on exchange matching engine
         result = {}
         for product in state.order_depths:
-            position = state.position[product]
+            # position = state.position[product]
             order_depth: OrderDepth = state.order_depths[product] # order book
             # each OrderDepth contains two dicts: buy_orders and sell_orders, mapping price to quantity
             orders: List[Order] = []
@@ -59,13 +59,22 @@ class Trader:
     def trade_osmium(self, order_depth):
         """Helper method; to call inside run() when trading osmium."""
         result = []
+        
+        
+        
         for price in order_depth.buy_orders:
+            
             if price >= 10001:
-                result.append(Order("ASH_COATED_OSMIUM", price, order_depth.buy_orders[price]))
+                # order_depth.buy_orders[price]
+                result.append(Order("ASH_COATED_OSMIUM", price, -5))
+                
         for price in order_depth.sell_orders:
+            
             if price <= 9999:
-                result.append(Order("ASH_COATED_OSMIUM", price, order_depth.sell_orders[price]))
-
+                # order_depth.sell_orders[price]
+                result.append(Order("ASH_COATED_OSMIUM", price, 5))
+        
+            
         return result
 
     def trade_pepper(self, order_depth):
