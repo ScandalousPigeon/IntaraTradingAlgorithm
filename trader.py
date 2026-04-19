@@ -21,11 +21,9 @@ class Trader:
         for product in state.order_depths:
             position = state.position.get(product, 0)
             
-            modifier = round(position / 20)
+            modifier = round(position / 20) # try to maintain neutral position
             
             our_price = 10000 + modifier
-
-            # modifier = 3 if position < -40 else -3 if position > 40 else 0
 
             order_depth: OrderDepth = state.order_depths[product] # order book
             # each OrderDepth contains two dicts: buy_orders and sell_orders, mapping price to quantity
@@ -50,30 +48,33 @@ class Trader:
         conversions = 0
         return result, conversions, next_trader_data
     
-    def trade_osmium(self, order_depth, position, modifier):
+    def trade_osmium(self, order_depth, position, our_price):
         result = []
         
         LIMIT = 80
 
         buy_room = LIMIT - position
         sell_room = LIMIT + position
+        margin = 5 # adjust as needed
 
-        for price in sorted(order_depth.buy_orders.items(), reverse=True):
+        for (price, qty) in sorted(order_depth.buy_orders.items(), reverse=True):
             if sell_room <= 0:
                 break
 
-            if price >= modifier:
-                qty = abs(modifier - price)
+            if price > our_price + margin:
+                #price_difference = price - our_price - margin
+                qty = min(sell_room, qty)
                 
                 result.append(Order("ASH_COATED_OSMIUM", price, -qty))
                 sell_room -= qty
 
-        for price in sorted(order_depth.sell_orders.items()):
+        for (price, volume) in sorted(order_depth.sell_orders.items()):
             if buy_room <= 0:
                 break
 
-            if price <= modifier:
-                qty = abs(modifier - price)
+            if price < our_price - margin:
+                #price_difference = our_price - margin - price 
+                qty = min(buy_room, qty)
                 result.append(Order("ASH_COATED_OSMIUM", price, qty))
                 buy_room -= qty
         
@@ -94,7 +95,7 @@ class Trader:
                 result.append(Order("INTARIAN_PEPPER_ROOT", price, buy_qty))
                 buy_room -= buy_qty
 
-        elif int(iteration) < 10:
+        elif int(iteration) < 15:
             buy_room = min(8, max(0, LIMIT - position))
             for price, qty in sorted(order_depth.sell_orders.items()):
                 if buy_room <= 0:
