@@ -55,25 +55,24 @@ class Trader:
 
         buy_room = LIMIT - position
         sell_room = LIMIT + position
-        margin = 5 # adjust as needed
+
+        margin = 3 # adjust as needed
 
         for (price, qty) in sorted(order_depth.buy_orders.items(), reverse=True):
             if sell_room <= 0:
                 break
 
             if price > our_price + margin:
-                #price_difference = price - our_price - margin
                 qty = min(sell_room, qty)
                 
                 result.append(Order("ASH_COATED_OSMIUM", price, -qty))
                 sell_room -= qty
 
-        for (price, volume) in sorted(order_depth.sell_orders.items()):
+        for (price, qty) in sorted(order_depth.sell_orders.items()):
             if buy_room <= 0:
                 break
 
             if price < our_price - margin:
-                #price_difference = our_price - margin - price 
                 qty = min(buy_room, qty)
                 result.append(Order("ASH_COATED_OSMIUM", price, qty))
                 buy_room -= qty
