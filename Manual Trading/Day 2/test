@@ -1,0 +1,30 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+optimal_allocation = []
+
+for allocation in range(101):
+    max_profit = 0
+    profit_max_x = 0
+    
+    for x in range(allocation + 1):
+        research = 200_000 * np.log(1 + x) / np.log(101)
+        scale = (allocation - x) * 0.07
+        profit = research * scale * 0.1
+        
+        if profit > max_profit:
+            max_profit = profit
+            profit_max_x = x
+
+    optimal_allocation.append([allocation, profit_max_x, max_profit])
+
+optimal_allocation = np.array(optimal_allocation)
+
+df = pd.DataFrame(optimal_allocation, columns=["Allocation", "Best_Research", "Max_Profit"])
+
+file_path = os.path.abspath("optimal_allocation.xlsx")
+df.to_excel(file_path, index=False, engine="openpyxl")
+
+print("Saved to:", file_path)

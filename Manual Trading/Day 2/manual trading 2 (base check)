@@ -1,0 +1,15 @@
+# change allocation between research and scale (everything else will be put into speed)
+import numpy as np
+allocation = 99
+max_profit = 0
+profix_max_x = 0
+for x in range(allocation+1):
+        research = (200_000 * np.log(1 + x) / np.log(1 + 100))
+        scale = (allocation-x) * 0.07
+        if (research * scale * 0.1) > max_profit:
+            max_profit = research * scale /10
+            profit_max_x = x
+
+print (f"optimal profit for allocation {allocation}:")
+print (f"max profit is {max_profit}")
+print (f"profit maximising allocation to research is {profit_max_x}")
