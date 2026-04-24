@@ -1,43 +1,63 @@
+import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-def plot_prices(csv_file):
-
-    df = pd.read_csv(csv_file, sep=";")
-
-    df.plot(x="timestamp", y="mid_price", kind="line")
-
-    plt.title(csv_file.stem)
-    plt.xlabel("Timestamp")
-    plt.ylabel("Mid Price")
-    output_file = Path("graphs") / f"{csv_file.stem}.png"
-    plt.savefig(output_file)
-    plt.close()
-
-def plot_trades(csv_file):
-    
-    df = pd.read_csv(csv_file, sep=";")
-
-    print(df.columns)
-
-    df.plot(x="timestamp", y="price", kind="line")
-
-    plt.title(csv_file.stem)
-    plt.xlabel("Time")
-    plt.ylabel("Price")
-    
-    
-    output_file = Path("graphs") / f"{csv_file.stem}.png"
-    plt.savefig(output_file)
-    plt.close()
-
 folder = Path("historical-csvs/round3")
 
-for csv_file in folder.glob("*.csv"):
-    if "prices" in csv_file.name:
-        plot_prices(csv_file)
-    elif "trades" in csv_file.name:
-        plot_trades(csv_file)
-    else:
-        raise ValueError("huh")
+st.title("IMC Prosperity CSV Viewer: Round 3")
+
+csv_files = list(folder.glob("*.csv"))
+
+selected_file = st.selectbox(
+    "Choose a CSV file",
+    csv_files,
+    format_func=lambda path: path.name
+)
+
+df = pd.read_csv(selected_file, sep=";")
+
+# filter by product
+
+if "product" in df.columns:
+    product = st.selectbox("Choose product", df["product"].unique())
+    df = df[df["product"] == product]
+
+if "symbol" in df.columns:
+    symbol = st.selectbox("Choose symbol", df["symbol"].unique())
+    df = df[df["symbol"] == symbol]
+
+st.subheader("Data Preview")
+st.dataframe(df)
+
+st.subheader("Columns")
+st.write(list(df.columns))
+
+# choose x and y columns
+x_column = st.selectbox("X-axis column", df.columns)
+
+numeric_columns = df.select_dtypes(include="number").columns
+y_column = st.selectbox("Y-axis column", numeric_columns)
+
+fig, ax = plt.subplots(figsize=(50, 25))
+# changing it too large crashes it
+
+df.plot(
+    x=x_column,
+    y=y_column,
+    kind="line",
+    ax=ax
+)
+
+ax.set_title(selected_file.stem)
+ax.set_xlabel(x_column)
+ax.set_ylabel(y_column)
+
+st.pyplot(fig)
+
+"""
+To run this, install Streamlit, Pandas, and Matplotlib:
+pip install streamlit pandas matplotlib or python3 -m pip install streamlit pandas matplotlib inside your venv idk
+
+then run: streamlit run data-analysis.py to open app in browser
+"""
