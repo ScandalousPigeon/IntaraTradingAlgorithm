@@ -1,6 +1,6 @@
 # change allocation between research and scale (everything else will be put into speed)
 import numpy as np
-allocation = 99
+allocation = 55
 max_profit = 0
 profix_max_x = 0
 for x in range(allocation+1):
