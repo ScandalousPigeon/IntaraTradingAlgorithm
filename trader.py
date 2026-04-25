@@ -81,9 +81,9 @@ class Trader:
 
     def trade_pepper(self, order_depth, iteration, position):
         result = []
-        """
+        
         LIMIT = 80
-            
+        
         if iteration == "":
             buy_room = min(8, max(0, LIMIT - position))
             for price, qty in sorted(order_depth.sell_orders.items()):
@@ -112,5 +112,5 @@ class Trader:
                 sell_qty = min(qty, sell_qty_left)
                 result.append(Order("INTARIAN_PEPPER_ROOT", price, -sell_qty))
                 sell_qty_left -= sell_qty
-        """
+        
         return result
