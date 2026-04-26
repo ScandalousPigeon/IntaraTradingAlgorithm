@@ -39,7 +39,7 @@ x_column = st.selectbox("X-axis column", df.columns)
 numeric_columns = df.select_dtypes(include="number").columns
 y_column = st.selectbox("Y-axis column", numeric_columns)
 
-fig, ax = plt.subplots(figsize=(50, 25))
+fig, ax = plt.subplots(figsize=(35, 20))
 # changing it too large crashes it
 
 df.plot(
