@@ -7,11 +7,7 @@ class Trader:
     def run(self, state: TradingState):
 
         result = {}
-
-        if state.traderData:
-            data = json.loads(state.traderData)
-        else:
-            data = {}
+        data = json.loads(state.traderData) if state.traderData else {}
 
         product = "VELVETFRUIT_EXTRACT"
         orders: List[Order] = []
@@ -25,96 +21,88 @@ class Trader:
                 best_bid = max(order_depth.buy_orders.keys())
                 best_ask = min(order_depth.sell_orders.keys())
 
-                mid = (best_bid + best_ask) / 2
+                best_bid_volume = order_depth.buy_orders[best_bid]
+                best_ask_volume = -order_depth.sell_orders[best_ask]
 
-                # =========================
-                # MODEL PARAMETERS
-                # =========================
+                mid = (best_bid + best_ask) / 2
 
                 LIMIT = 200
 
-                BASE_FAIR = 5250          # observed long-run average
-                ALPHA = 0.003             # slow EMA for 10,000-step simulation
-                EDGE = 6                  # quote distance from fair
-                ORDER_SIZE = 12           # passive order size
-                INVENTORY_SKEW = 0.04     # shifts quotes against inventory
+                BASE_FAIR = 5250
+                ALPHA = 0.002
 
-                # =========================
-                # FAIR VALUE MODEL
-                # =========================
+                PASSIVE_EDGE = 4
+                PASSIVE_SIZE = 15
 
-                if "velvet_fair" not in data:
-                    data["velvet_fair"] = BASE_FAIR
-                else:
-                    data["velvet_fair"] = (
-                        ALPHA * mid
-                        + (1 - ALPHA) * data["velvet_fair"]
-                    )
+                TAKE_EDGE = 8
+                TAKE_SIZE = 15
 
-                fair = data["velvet_fair"]
+                INVENTORY_SKEW = 0.08
+                MOMENTUM_SKEW = 0.1
 
-                # Pull fair slightly back toward the known long-run centre
-                fair = 0.9 * fair + 0.1 * BASE_FAIR
-                data["velvet_fair"] = fair
+                # Fair value
+                if "fair" not in data:
+                    data["fair"] = BASE_FAIR
 
-                # =========================
-                # POSITION / INVENTORY
-                # =========================
+                fair = ALPHA * mid + (1 - ALPHA) * data["fair"]
+                data["fair"] = fair
 
+                # Momentum
+                if "last_mid" not in data:
+                    data["last_mid"] = mid
+
+                momentum = mid - data["last_mid"]
+                data["last_mid"] = mid
+
+                # Warmup: update fair/momentum but do not trade yet
+                WARMUP_TIME = 5000
+
+                if state.timestamp < WARMUP_TIME:
+                    result[product] = []
+                    return result, 0, json.dumps(data)
+
+                # Position
                 position = state.position.get(product, 0)
 
                 buy_room = LIMIT - position
                 sell_room = LIMIT + position
 
-                # If long, lower fair to encourage selling.
-                # If short, raise fair to encourage buying.
-                adjusted_fair = fair - INVENTORY_SKEW * position
+                adjusted_fair = (
+                    fair
+                    - INVENTORY_SKEW * position
+                    + MOMENTUM_SKEW * momentum
+                )
 
-                # =========================
-                # PASSIVE MARKET MAKING
-                # =========================
+                # Passive market-making quotes
+                bid_price = int(round(adjusted_fair - PASSIVE_EDGE))
+                ask_price = int(round(adjusted_fair + PASSIVE_EDGE))
 
-                bid_price = int(round(adjusted_fair - EDGE))
-                ask_price = int(round(adjusted_fair + EDGE))
-
-                # Do not cross the spread.
-                # We want to provide liquidity, not constantly take liquidity.
-                bid_price = min(bid_price, best_bid + 1)
-                ask_price = max(ask_price, best_ask - 1)
+                # Do not cross the spread with passive orders
+                bid_price = min(bid_price, best_ask - 1)
+                ask_price = max(ask_price, best_bid + 1)
 
                 if buy_room > 0:
-                    buy_qty = min(ORDER_SIZE, buy_room)
+                    buy_qty = min(PASSIVE_SIZE, buy_room)
                     orders.append(Order(product, bid_price, buy_qty))
 
                 if sell_room > 0:
-                    sell_qty = min(ORDER_SIZE, sell_room)
+                    sell_qty = min(PASSIVE_SIZE, sell_room)
                     orders.append(Order(product, ask_price, -sell_qty))
 
-                # =========================
-                # AGGRESSIVE MEAN REVERSION
-                # =========================
-                # Only cross the spread when price is very far from fair.
-
-                AGGRESSIVE_EDGE = 18
-
-                if best_ask < adjusted_fair - AGGRESSIVE_EDGE and buy_room > 0:
-                    available = -order_depth.sell_orders[best_ask]
-                    qty = min(available, buy_room, 25)
+                # Small aggressive fills
+                if best_ask < adjusted_fair - TAKE_EDGE and buy_room > 0:
+                    qty = min(TAKE_SIZE, best_ask_volume, buy_room)
                     if qty > 0:
                         orders.append(Order(product, best_ask, qty))
 
-                if best_bid > adjusted_fair + AGGRESSIVE_EDGE and sell_room > 0:
-                    available = order_depth.buy_orders[best_bid]
-                    qty = min(available, sell_room, 25)
+                if best_bid > adjusted_fair + TAKE_EDGE and sell_room > 0:
+                    qty = min(TAKE_SIZE, best_bid_volume, sell_room)
                     if qty > 0:
                         orders.append(Order(product, best_bid, -qty))
 
         result[product] = orders
 
-        traderData = json.dumps(data)
-
-        conversions = 0
-
-        return result, conversions, traderData
+        return result, 0, json.dumps(data)
     
-    # 1700 
+
+# 5200

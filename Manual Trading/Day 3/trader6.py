@@ -23,18 +23,17 @@ class Trader:
 
                 mid = (best_bid + best_ask) / 2
 
-                # Parameters
                 LIMIT = 200
-                BASE_FAIR = 9990
-                
-                ALPHA = 0.015     
+                BASE_FAIR = 10000
+
+                ALPHA = 0.01
                 ANCHOR_WEIGHT = 0.02
 
-                EDGE = 8
-                ORDER_SIZE = 16
+                EDGE = 10
+                ORDER_SIZE = 14
                 INVENTORY_SKEW = 0.03
+                TREND_SKEW = 0.03
 
-                # Fair value
                 if "hydrogel_fair" not in data:
                     data["hydrogel_fair"] = BASE_FAIR
                 else:
@@ -45,26 +44,28 @@ class Trader:
 
                 fair = data["hydrogel_fair"]
 
-                # Weak pull to long-run centre
                 fair = (1 - ANCHOR_WEIGHT) * fair + ANCHOR_WEIGHT * BASE_FAIR
                 data["hydrogel_fair"] = fair
 
-                # Position
                 position = state.position.get(product, 0)
 
                 buy_room = LIMIT - position
                 sell_room = LIMIT + position
 
-                # Inventory skew
-                adjusted_fair = fair - INVENTORY_SKEW * position
+                trend = mid - fair
 
-                # Passive market-making quotes
+                adjusted_fair = (
+                    fair
+                    + TREND_SKEW * trend
+                    - INVENTORY_SKEW * position
+                )
+
                 bid_price = int(round(adjusted_fair - EDGE))
                 ask_price = int(round(adjusted_fair + EDGE))
 
-                # Avoid crossing too much
-                bid_price = min(bid_price, best_bid + 1)
-                ask_price = max(ask_price, best_ask - 1)
+                # Stay passive: do not cross the current book
+                bid_price = min(bid_price, best_bid)
+                ask_price = max(ask_price, best_ask)
 
                 if buy_room > 0:
                     buy_qty = min(ORDER_SIZE, buy_room)
@@ -80,6 +81,3 @@ class Trader:
         conversions = 0
 
         return result, conversions, traderData
-    
-
-    # 729*
