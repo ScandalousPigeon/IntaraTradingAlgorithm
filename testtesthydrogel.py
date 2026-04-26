@@ -13,7 +13,7 @@ class Trader:
         else:
             data = {"iteration" : 0,
                     "hist_mid_price" : 0}
-
+        
         product = "HYDROGEL_PACK"
         # each OrderDepth contains two dicts: buy_orders and sell_orders, mapping price to quantity
         if product in state.order_depths:
@@ -22,7 +22,7 @@ class Trader:
             result[product] = self.trade_hydrogel(product, order_depth, position, data)
         else:
             result[product] = []
-
+        """
         product = "VELVETFRUIT_EXTRACT"
         if product in state.order_depths:
             order_depth = state.order_depths[product]
@@ -30,7 +30,7 @@ class Trader:
             result[product] = self.trade_velvetfruit(product, order_depth, position, data)
         else:
             result[product] = []
-
+        """
         traderData = json.dumps(data)
         conversions = 0
 
@@ -56,14 +56,14 @@ class Trader:
 
         # Parameters
         LIMIT = 200
-        BASE_FAIR = 10000
+        BASE_FAIR = 9991
 
-        ALPHA = 0.01
+        ALPHA = 0.10
         ANCHOR_WEIGHT = 0.02
 
-        EDGE = 10
+        EDGE = 7
         ORDER_SIZE = 12
-        INVENTORY_SKEW = 0.03
+        INVENTORY_SKEW = 0.10
 
         # Fair value
         if "hydrogel_fair" not in data:
@@ -127,10 +127,12 @@ class Trader:
         LIMIT = 200
 
         BASE_FAIR = 5250
-        ALPHA = 0.003
-        EDGE = 6
+        ALPHA = 0.01
+        ANCHOR_WEIGHT = 0.03
+        EDGE = 4
         ORDER_SIZE = 12
-        INVENTORY_SKEW = 0.04
+        INVENTORY_SKEW = 0.08
+        AGGRESSIVE_EDGE = 22
 
         # Fair value model
         if "velvet_fair" not in data:
@@ -144,7 +146,7 @@ class Trader:
         fair = data["velvet_fair"]
 
         # Pull fair slightly back toward long-run centre
-        fair = 0.9 * fair + 0.1 * BASE_FAIR
+        fair = (1 - ANCHOR_WEIGHT) * fair + ANCHOR_WEIGHT * BASE_FAIR
         data["velvet_fair"] = fair
 
         # Position limits
@@ -171,7 +173,7 @@ class Trader:
             orders.append(Order(product, ask_price, -sell_qty))
 
         # Aggressive mean reversion
-        AGGRESSIVE_EDGE = 18
+        
 
         if best_ask < adjusted_fair - AGGRESSIVE_EDGE and buy_room > 0:
             available = -order_depth.sell_orders[best_ask]
