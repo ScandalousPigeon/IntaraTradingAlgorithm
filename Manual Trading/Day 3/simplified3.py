@@ -1,5 +1,5 @@
 intrinsic_value = 920
-average_bid_others = 836 # change as needed
+average_bid_others = 850 # change as needed
 
 
 highest_profit = [0,670]

@@ -23,48 +23,61 @@ class Trader:
 
                 mid = (best_bid + best_ask) / 2
 
-                # Parameters
                 LIMIT = 200
-                BASE_FAIR = 9991
+                ALPHA = 0.03
 
-                ALPHA = 0.03     # 0.015
-                ANCHOR_WEIGHT = 0.02
+                BASE_EDGE = 5
+                VOL_MULT = 0.4
 
-                EDGE = 5
-                ORDER_SIZE = 16
-                INVENTORY_SKEW = 0.03
+                ORDER_SIZE = 20
+                INVENTORY_SKEW = 0.01
 
-                # Fair value
                 if "hydrogel_fair" not in data:
-                    data["hydrogel_fair"] = BASE_FAIR
-                else:
-                    data["hydrogel_fair"] = (
-                        ALPHA * mid
-                        + (1 - ALPHA) * data["hydrogel_fair"]
-                    )
+                    data["hydrogel_fair"] = mid
 
                 fair = data["hydrogel_fair"]
 
-                # Weak pull to long-run centre
-                fair = (1 - ANCHOR_WEIGHT) * fair + ANCHOR_WEIGHT * BASE_FAIR
-                data["hydrogel_fair"] = fair
+                if "hydrogel_last_mid" not in data:
+                    data["hydrogel_last_mid"] = mid
 
-                # Position
+                last_mid = data["hydrogel_last_mid"]
+                instant_vol = abs(mid - last_mid)
+
+                if "hydrogel_vol" not in data:
+                    data["hydrogel_vol"] = instant_vol
+                else:
+                    data["hydrogel_vol"] = (
+                        0.05 * instant_vol
+                        + 0.95 * data["hydrogel_vol"]
+                    )
+
+                vol = data["hydrogel_vol"]
+
+                fair = ALPHA * mid + (1 - ALPHA) * fair
+
+                data["hydrogel_fair"] = fair
+                data["hydrogel_last_mid"] = mid
+
                 position = state.position.get(product, 0)
 
                 buy_room = LIMIT - position
                 sell_room = LIMIT + position
 
-                # Inventory skew
                 adjusted_fair = fair - INVENTORY_SKEW * position
 
-                # Passive market-making quotes
-                bid_price = int(round(adjusted_fair - EDGE))
-                ask_price = int(round(adjusted_fair + EDGE))
+                edge = BASE_EDGE + VOL_MULT * vol
+                edge = max(4, min(20, edge))
 
-                # Avoid crossing too much
+                bid_price = int(round(adjusted_fair - edge))
+                ask_price = int(round(adjusted_fair + edge))
+
+                # More competitive, but usually not crossing
                 bid_price = min(bid_price, best_bid + 1)
                 ask_price = max(ask_price, best_ask - 1)
+
+                if bid_price >= ask_price:
+                    bid_price = best_bid
+                    ask_price = best_ask
 
                 if buy_room > 0:
                     buy_qty = min(ORDER_SIZE, buy_room)
@@ -75,11 +88,4 @@ class Trader:
                     orders.append(Order(product, ask_price, -sell_qty))
 
         result[product] = orders
-
-        traderData = json.dumps(data)
-        conversions = 0
-
-        return result, conversions, traderData
-    
-
-    # 952*
+        return result, 0, json.dumps(data)

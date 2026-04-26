@@ -1,10 +1,9 @@
 intrinsic_value = 920
-average_bid_others = 836 # change as needed
 
 
 profit_maximise = []
 for average_bid_others in range(671,920):
-    highest_profit = [average_bid_others,0,670]
+    highest_profit = [average_bid_others,0,670, 671]
     for first_bid_price in range(670,921):
         for second_bid_price in range(first_bid_price + 1, 921):
             profit = 0
@@ -37,7 +36,7 @@ plt.title("Maximum Profit vs Average Bid of Others")
 plt.grid(True)
 plt.show()
 
-'''
+
 first_bids = [row[2] for row in profit_maximise]
 second_bids = [row[3] for row in profit_maximise]
 
@@ -53,4 +52,4 @@ plt.title("Optimal Bids vs Average Bid of Others")
 plt.legend()
 plt.grid(True)
 plt.show()
-'''
+
