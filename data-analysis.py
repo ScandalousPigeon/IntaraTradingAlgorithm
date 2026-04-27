@@ -3,9 +3,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-folder = Path("historical-csvs/round3")
+folder = Path("historical-csvs/round4")
 
-st.title("IMC Prosperity CSV Viewer: Round 3")
+st.title("IMC Prosperity CSV Viewer: Round 4")
 
 csv_files = list(folder.glob("*.csv"))
 
@@ -39,7 +39,7 @@ x_column = st.selectbox("X-axis column", df.columns)
 numeric_columns = df.select_dtypes(include="number").columns
 y_column = st.selectbox("Y-axis column", numeric_columns)
 
-fig, ax = plt.subplots(figsize=(35, 20))
+fig, ax = plt.subplots(figsize=(28, 18))
 # changing it too large crashes it
 
 df.plot(
