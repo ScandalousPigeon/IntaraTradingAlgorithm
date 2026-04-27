@@ -200,7 +200,7 @@ class Trader:
 
         signal = fair - mid - MOMENTUM_SKEW * momentum
 
-        WARMUP_TIME = 5000
+        WARMUP_TIME = 10000
 
         # Skip Velvetfruit/options during warmup, but Hydrogel still trades.
         if state.timestamp < WARMUP_TIME:
@@ -251,7 +251,7 @@ class Trader:
 
         # This is not meant to be perfect. It is just used for delta filtering.
         # You can tune this later from historical data.
-        ASSUMED_VOL = 0.18
+        ASSUMED_VOL = 0.24
 
         BASE_OPTION_SIZE = 30
 
