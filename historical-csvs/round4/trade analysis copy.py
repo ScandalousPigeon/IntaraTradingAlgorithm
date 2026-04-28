@@ -42,7 +42,7 @@ df = pd.concat(
 # FILTER PRODUCT
 # =====================================
 
-product = "HYDROGEL_PACK"
+product = "VEV_500"
 
 df = df[
     df["symbol"] == product
@@ -96,7 +96,7 @@ buyer_stats = (
 )
 
 buyer_stats = buyer_stats[
-    buyer_stats["num_trades"] >= 50
+    buyer_stats["num_trades"] >= 30
 ]
 
 buyer_stats["t_stat"] = (
@@ -157,7 +157,7 @@ print("BEST SELLERS")
 print("====================")
 
 print(seller_stats)
-'''
+"""
 summary = []
 
 for LOOKAHEAD in [10, 20, 50, 100, 200]:
@@ -181,7 +181,7 @@ for LOOKAHEAD in [10, 20, 50, 100, 200]:
 
 summary_df = pd.DataFrame(summary)
 print(summary_df)
-'''
+
 events = []
 
 for i, row in df.iterrows():
@@ -221,3 +221,4 @@ events = pd.DataFrame(events)
 print(events.groupby("signal")[
     ["move_1", "move_5", "move_10", "move_20", "move_50", "move_100"]
 ].mean())
+"""
