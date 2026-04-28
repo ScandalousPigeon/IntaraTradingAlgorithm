@@ -1,5 +1,4 @@
 from datamodel import OrderDepth, TradingState, Order
-from typing import List
 import json
 import math
 
@@ -16,24 +15,7 @@ class Trader:
             result[product] = []
 
         # -------------------------
-        # HYDROGEL_PACK
-        # -------------------------
-
-        hydrogel = "HYDROGEL_PACK"
-
-        if hydrogel in state.order_depths:
-            order_depth = state.order_depths[hydrogel]
-            position = state.position.get(hydrogel, 0)
-
-            result[hydrogel] = self.trade_hydrogel(
-                product=hydrogel,
-                order_depth=order_depth,
-                position=position,
-                data=data
-            )
-
-        # -------------------------
-        # VELVETFRUIT + OPTIONS
+        # VELVETFRUIT + VOUCHERS ONLY
         # -------------------------
 
         self.trade_velvetfruit_and_options(
@@ -59,7 +41,9 @@ class Trader:
         if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
             return 0.0
 
-        d1 = (math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
+        d1 = (math.log(S / K) + 0.5 * sigma * sigma * T) / (
+            sigma * math.sqrt(T)
+        )
         return self.norm_cdf(d1)
 
     def get_strike_from_voucher(self, product: str):
@@ -71,78 +55,6 @@ class Trader:
             return int(product.split("_")[1])
         except:
             return None
-
-    # ============================================================
-    # HYDROGEL_PACK
-    # ============================================================
-
-    def trade_hydrogel(
-        self,
-        product: str,
-        order_depth: OrderDepth,
-        position: int,
-        data: dict
-    ) -> List[Order]:
-
-        orders: List[Order] = []
-
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return orders
-
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-
-        mid = (best_bid + best_ask) / 2
-
-        # Parameters
-        LIMIT = 200
-        BASE_FAIR = 9991
-
-        ALPHA = 0.03
-        ANCHOR_WEIGHT = 0.02
-
-        EDGE = 5
-        ORDER_SIZE = 16
-        INVENTORY_SKEW = 0.03
-
-        # Fair value
-        if "hydrogel_fair" not in data:
-            data["hydrogel_fair"] = BASE_FAIR
-        else:
-            data["hydrogel_fair"] = (
-                ALPHA * mid
-                + (1 - ALPHA) * data["hydrogel_fair"]
-            )
-
-        fair = data["hydrogel_fair"]
-
-        # Weak pull to long-run centre
-        fair = (1 - ANCHOR_WEIGHT) * fair + ANCHOR_WEIGHT * BASE_FAIR
-        data["hydrogel_fair"] = fair
-
-        buy_room = LIMIT - position
-        sell_room = LIMIT + position
-
-        # Inventory skew
-        adjusted_fair = fair - INVENTORY_SKEW * position
-
-        # Passive market-making quotes
-        bid_price = int(round(adjusted_fair - EDGE))
-        ask_price = int(round(adjusted_fair + EDGE))
-
-        # Avoid crossing too much
-        bid_price = min(bid_price, best_bid + 1)
-        ask_price = max(ask_price, best_ask - 1)
-
-        if buy_room > 0:
-            buy_qty = min(ORDER_SIZE, buy_room)
-            orders.append(Order(product, bid_price, buy_qty))
-
-        if sell_room > 0:
-            sell_qty = min(ORDER_SIZE, sell_room)
-            orders.append(Order(product, ask_price, -sell_qty))
-
-        return orders
 
     # ============================================================
     # VELVETFRUIT + OPTIONS
@@ -157,8 +69,7 @@ class Trader:
 
         underlying = "VELVETFRUIT_EXTRACT"
 
-        # IMPORTANT CHANGE:
-        # Instead of hardcoding only 3 vouchers, trade every visible VEV option.
+        # Trade every visible VEV option
         option_products = [
             product for product in state.order_depths
             if product.startswith("VEV_")
@@ -202,7 +113,6 @@ class Trader:
 
         WARMUP_TIME = 10000
 
-        # Skip Velvetfruit/options during warmup, but Hydrogel still trades.
         if state.timestamp < WARMUP_TIME:
             return
 
@@ -244,13 +154,11 @@ class Trader:
 
         OPTION_LIMIT = 300
 
-        # Round 4 voucher expiry:
+        # Round 4 voucher expiry
         TTE_DAYS = 4
         TRADING_DAYS_PER_YEAR = 252
         T = TTE_DAYS / TRADING_DAYS_PER_YEAR
 
-        # This is not meant to be perfect. It is just used for delta filtering.
-        # You can tune this later from historical data.
         ASSUMED_VOL = 0.24
 
         BASE_OPTION_SIZE = 30
@@ -284,7 +192,6 @@ class Trader:
             opt_buy_room = OPTION_LIMIT - opt_position
             opt_sell_room = OPTION_LIMIT + opt_position
 
-            # Use Round 4 TTE to estimate option sensitivity.
             delta = self.call_delta(
                 S=mid,
                 K=strike,
@@ -292,29 +199,22 @@ class Trader:
                 sigma=ASSUMED_VOL
             )
 
-            # Ignore options that barely move with the underlying.
-            # With only 4 days left, far OTM calls may have very low delta.
             MIN_DELTA = 0.05
 
             if delta < MIN_DELTA:
                 continue
 
-            # Delta-adjusted directional signal:
-            # ATM/ITM vouchers get traded more; far OTM vouchers get traded less.
             option_signal = signal * delta
-
-            # Scale size by delta.
-            # Higher-delta vouchers receive larger orders.
             option_size = max(5, int(BASE_OPTION_SIZE * delta))
 
-            # Buy calls when underlying looks cheap.
+            # Buy calls when underlying looks cheap
             if option_signal > BUY_CALL_THRESHOLD and opt_buy_room > 0:
                 qty = min(option_size, opt_ask_volume, opt_buy_room)
 
                 if qty > 0:
                     result[option].append(Order(option, opt_ask, qty))
 
-            # Sell calls when underlying looks expensive.
+            # Sell calls when underlying looks expensive
             if option_signal < SELL_CALL_THRESHOLD and opt_sell_room > 0:
                 qty = min(option_size, opt_bid_volume, opt_sell_room)
 
