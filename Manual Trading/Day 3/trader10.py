@@ -51,7 +51,7 @@ class Trader:
 
         signal = fair - mid - MOMENTUM_SKEW * momentum
 
-        WARMUP_TIME = 5000
+        WARMUP_TIME = 8000
 
         if state.timestamp < WARMUP_TIME:
             return result, 0, json.dumps(data)

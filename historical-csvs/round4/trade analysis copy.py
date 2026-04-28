@@ -42,7 +42,7 @@ df = pd.concat(
 # FILTER PRODUCT
 # =====================================
 
-product = "VELVETFRUIT_EXTRACT"
+product = "HYDROGEL_PACK"
 
 df = df[
     df["symbol"] == product
@@ -157,3 +157,67 @@ print("BEST SELLERS")
 print("====================")
 
 print(seller_stats)
+'''
+summary = []
+
+for LOOKAHEAD in [10, 20, 50, 100, 200]:
+    temp = df.copy()
+    temp["future_price"] = temp.groupby("day")["price"].shift(-LOOKAHEAD)
+    temp["future_return"] = temp["future_price"] - temp["price"]
+    temp = temp.dropna(subset=["future_return"])
+
+    for trader in ["Mark 14", "Mark 38"]:
+        buys = temp[temp["buyer"] == trader]["future_return"]
+        sells = temp[temp["seller"] == trader]["future_return"]
+
+        summary.append({
+            "lookahead": LOOKAHEAD,
+            "trader": trader,
+            "buy_mean": buys.mean(),
+            "sell_mean": sells.mean(),
+            "buy_count": buys.count(),
+            "sell_count": sells.count(),
+        })
+
+summary_df = pd.DataFrame(summary)
+print(summary_df)
+'''
+events = []
+
+for i, row in df.iterrows():
+
+    signal = None
+
+    if row["buyer"] == "Mark 14":
+        signal = "M14_BUY"
+    elif row["seller"] == "Mark 14":
+        signal = "M14_SELL"
+    elif row["buyer"] == "Mark 38":
+        signal = "M38_BUY"
+    elif row["seller"] == "Mark 38":
+        signal = "M38_SELL"
+
+    if signal is not None:
+        event = {
+            "day": row["day"],
+            "timestamp": row["timestamp"],
+            "signal": signal,
+            "price_0": row["price"],
+        }
+
+        for h in [1, 5, 10, 20, 50, 100]:
+            future = df[
+                (df["day"] == row["day"]) &
+                (df.index == i + h)
+            ]
+
+            if len(future) > 0:
+                event[f"move_{h}"] = future["price"].iloc[0] - row["price"]
+
+        events.append(event)
+
+events = pd.DataFrame(events)
+
+print(events.groupby("signal")[
+    ["move_1", "move_5", "move_10", "move_20", "move_50", "move_100"]
+].mean())

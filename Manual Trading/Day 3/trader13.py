@@ -13,13 +13,21 @@ class Trader:
             result[product] = []
 
         underlying = "VELVETFRUIT_EXTRACT"
-        option_products = ["VEV_5100", "VEV_5200", "VEV_5300"]
+
+        option_products = [
+            "VEV_4000",
+            "VEV_4500",
+            "VEV_5000",
+            "VEV_5100",
+            "VEV_5200",
+            "VEV_5300",
+            "VEV_5400",
+        ]
 
         if underlying not in state.order_depths:
             return result, 0, json.dumps(data)
 
         depth = state.order_depths[underlying]
-
         if not depth.buy_orders or not depth.sell_orders:
             return result, 0, json.dumps(data)
 
@@ -28,21 +36,17 @@ class Trader:
         mid = (best_bid + best_ask) / 2
 
         # =====================
-        # FAIR VALUE / SIGNAL
+        # SIGNAL MODEL
         # =====================
 
-        BASE_FAIR = 5250
-
-        FAST_ALPHA = 0.03
-        SLOW_ALPHA = 0.002
-        SIGNAL_ALPHA = 0.12
+        FAST_ALPHA = 0.05
+        SLOW_ALPHA = 0.003
+        SIGNAL_ALPHA = 0.25
 
         if "fast_fair" not in data:
             data["fast_fair"] = mid
-
         if "slow_fair" not in data:
-            data["slow_fair"] = BASE_FAIR
-
+            data["slow_fair"] = mid
         if "last_mid" not in data:
             data["last_mid"] = mid
 
@@ -51,7 +55,7 @@ class Trader:
 
         momentum = mid - data["last_mid"]
 
-        raw_signal = slow_fair - mid - 0.15 * momentum
+        raw_signal = fast_fair - slow_fair + 0.20 * momentum
 
         if "signal" not in data:
             data["signal"] = raw_signal
@@ -63,24 +67,24 @@ class Trader:
         data["last_mid"] = mid
         data["signal"] = signal
 
-        if state.timestamp < 1000:
+        if state.timestamp < 500:
             return result, 0, json.dumps(data)
 
         # =====================
-        # UNDERLYING PASSIVE MM
+        # UNDERLYING PASSIVE TRADING
         # =====================
 
         UNDERLYING_LIMIT = 200
-        PASSIVE_SIZE = 15
-        PASSIVE_EDGE = 4
-        INVENTORY_SKEW = 0.08
+        PASSIVE_SIZE = 20
+        PASSIVE_EDGE = 3
+        INVENTORY_SKEW = 0.06
 
-        pos = state.position.get(underlying, 0)
+        position = state.position.get(underlying, 0)
 
-        buy_room = UNDERLYING_LIMIT - pos
-        sell_room = UNDERLYING_LIMIT + pos
+        buy_room = UNDERLYING_LIMIT - position
+        sell_room = UNDERLYING_LIMIT + position
 
-        adjusted_fair = slow_fair - INVENTORY_SKEW * pos + 0.10 * momentum
+        adjusted_fair = slow_fair - INVENTORY_SKEW * position + 0.15 * momentum
 
         bid_price = int(round(adjusted_fair - PASSIVE_EDGE))
         ask_price = int(round(adjusted_fair + PASSIVE_EDGE))
@@ -99,31 +103,25 @@ class Trader:
             )
 
         # =====================
-        # OPTIONS DIRECTIONAL DELTA TRADING
+        # ALL OPTION STRIKES
         # =====================
 
         OPTION_LIMIT = 300
 
-        BUY_THRESHOLD = 5
-        SELL_THRESHOLD = -5
-        EXIT_THRESHOLD = 2
+        BUY_THRESHOLD = 3
+        SELL_THRESHOLD = -3
+        EXIT_THRESHOLD = 1
 
-        # lower strike = higher delta = larger directional exposure
         option_params = {
-            "VEV_5100": {
-                "size": 45,
-                "max_spread": 18,
-            },
-            "VEV_5200": {
-                "size": 35,
-                "max_spread": 16,
-            },
-            "VEV_5300": {
-                "size": 25,
-                "max_spread": 14,
-            },
+            "VEV_4000": {"size": 0,  "max_spread": 0},   # disable
+            "VEV_4500": {"size": 15, "max_spread": 18},
+            "VEV_5000": {"size": 40, "max_spread": 22},
+            "VEV_5100": {"size": 85, "max_spread": 30},
+            "VEV_5200": {"size": 80, "max_spread": 30},
+            "VEV_5300": {"size": 65, "max_spread": 28},
+            "VEV_5400": {"size": 25, "max_spread": 20},
         }
-
+        
         bullish = signal > BUY_THRESHOLD
         bearish = signal < SELL_THRESHOLD
         weak = abs(signal) < EXIT_THRESHOLD
@@ -134,7 +132,6 @@ class Trader:
                 continue
 
             od = state.order_depths[option]
-
             if not od.buy_orders or not od.sell_orders:
                 continue
 
@@ -149,38 +146,35 @@ class Trader:
             bid_volume = od.buy_orders[opt_bid]
             ask_volume = -od.sell_orders[opt_ask]
 
-            opt_pos = state.position.get(option, 0)
+            opt_position = state.position.get(option, 0)
 
-            buy_room = OPTION_LIMIT - opt_pos
-            sell_room = OPTION_LIMIT + opt_pos
+            opt_buy_room = OPTION_LIMIT - opt_position
+            opt_sell_room = OPTION_LIMIT + opt_position
 
             base_size = option_params[option]["size"]
 
-            # stronger signal = larger size
-            signal_mult = min(2.0, max(1.0, abs(signal) / 12))
-            trade_size = int(base_size * signal_mult)
+            trade_size = int(
+                base_size * min(3.5, 1.0 + abs(signal) / 6.0)
+            )
 
-            # Buy calls when underlying looks cheap
-            if bullish and buy_room > 0:
-                qty = min(trade_size, ask_volume, buy_room)
+            if bullish and opt_buy_room > 0:
+                qty = min(trade_size, ask_volume, opt_buy_room)
                 if qty > 0:
                     result[option].append(Order(option, opt_ask, qty))
 
-            # Sell calls when underlying looks expensive
-            elif bearish and sell_room > 0:
-                qty = min(trade_size, bid_volume, sell_room)
+            elif bearish and opt_sell_room > 0:
+                qty = min(trade_size, bid_volume, opt_sell_room)
                 if qty > 0:
                     result[option].append(Order(option, opt_bid, -qty))
 
-            # unwind stale long/short option exposure when signal disappears
             elif weak:
-                if opt_pos > 0 and sell_room > 0:
-                    qty = min(abs(opt_pos), base_size, bid_volume, sell_room)
+                if opt_position > 0:
+                    qty = min(abs(opt_position), base_size, bid_volume)
                     if qty > 0:
                         result[option].append(Order(option, opt_bid, -qty))
 
-                elif opt_pos < 0 and buy_room > 0:
-                    qty = min(abs(opt_pos), base_size, ask_volume, buy_room)
+                elif opt_position < 0:
+                    qty = min(abs(opt_position), base_size, ask_volume)
                     if qty > 0:
                         result[option].append(Order(option, opt_ask, qty))
 
