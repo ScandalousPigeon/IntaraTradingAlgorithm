@@ -21,7 +21,7 @@ class Trader:
         return result, 0, json.dumps(data)
 
     def trade_translator_space_gray(self, state: TradingState, result: Dict[str, List[Order]], data: dict) -> None:
-        PRODUCT = "TRANSLATOR_SPACE_GRAY"
+        PRODUCT = "TRANSLATOR_ASTRO_BLACK"
 
         if PRODUCT not in state.order_depths:
             return
