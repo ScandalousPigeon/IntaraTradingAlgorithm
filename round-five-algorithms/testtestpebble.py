@@ -1,192 +1,191 @@
 from datamodel import OrderDepth, TradingState, Order
-from typing import List
 import json
-import math
 
 
 class Trader:
+
+    PEBBLES = [
+        "PEBBLES_XS",
+        "PEBBLES_S",
+        "PEBBLES_M",
+        "PEBBLES_L",
+        "PEBBLES_XL",
+    ]
+
+    BASKET_FAIR = 50000
+    LIMIT = 10
+
+    # Conservative because your graph had a large drawdown.
+    TAKE_EDGE = 2
+    TAKE_SIZE = 1
+
+    # Passive package market-making.
+    PASSIVE_EDGE = 15
+    PASSIVE_SIZE = 2
+
+    # Stop adding to inventory when already quite long/short.
+    SOFT_LIMIT = 6
 
     def run(self, state: TradingState):
 
         result = {}
         data = json.loads(state.traderData) if state.traderData else {}
 
-        # Make sure every visible product has an entry
-        for product in state.order_depths:
-            result[product] = []
-
-        # -------------------------
-        # PEBBLES
-        # -------------------------
-
-        self.trade_pebbles(
-            state=state,
-            result=result,
-            data=data
-        )
+        self.trade_pebbles(state, result, data)
 
         return result, 0, json.dumps(data)
 
-    # ============================================================
-    # PEBBLES
-    # ============================================================
+    def trade_pebbles(self, state: TradingState, result: dict, data: dict) -> None:
 
-    def trade_pebbles(
-        self,
-        state: TradingState,
-        result: dict,
-        data: dict
-    ) -> None:
+        info = {}
 
-        pebble_products = [
-            "PEBBLES_XS",
-            "PEBBLES_S",
-            "PEBBLES_M",
-            "PEBBLES_L",
-            "PEBBLES_XL"
-        ]
-
-        # Hidden basket relationship found from historical data:
-        # XS + S + M + L + XL ~= 50000
-        BASKET_FAIR = 50000
-
-        LIMIT = 10
-
-        # Aggressive orders only when there is clear edge after crossing spread.
-        TAKE_EDGE = 1.0
-        TAKE_SIZE = 4
-
-        # Passive market-making around relationship fair value.
-        PASSIVE_EDGE = 2.0
-        PASSIVE_SIZE = 2
-
-        # Since limit is only 10, inventory skew needs to matter.
-        INVENTORY_SKEW = 0.6
-
-        # Need all 5 Pebbles visible to use the basket relationship.
-        for product in pebble_products:
+        # Need all 5 Pebbles visible.
+        for product in self.PEBBLES:
             if product not in state.order_depths:
                 return
 
-            depth = state.order_depths[product]
+            depth: OrderDepth = state.order_depths[product]
 
             if not depth.buy_orders or not depth.sell_orders:
                 return
 
-        pebble_data = {}
-
-        for product in pebble_products:
-
-            depth = state.order_depths[product]
-
             best_bid = max(depth.buy_orders.keys())
             best_ask = min(depth.sell_orders.keys())
 
-            best_bid_volume = depth.buy_orders[best_bid]
-            best_ask_volume = -depth.sell_orders[best_ask]
+            result[product] = []
 
-            mid = (best_bid + best_ask) / 2
-
-            pebble_data[product] = {
+            info[product] = {
                 "depth": depth,
                 "best_bid": best_bid,
                 "best_ask": best_ask,
-                "best_bid_volume": best_bid_volume,
-                "best_ask_volume": best_ask_volume,
-                "mid": mid
+                "best_bid_volume": depth.buy_orders[best_bid],
+                "best_ask_volume": -depth.sell_orders[best_ask],
+                "mid": (best_bid + best_ask) / 2,
+                "position": state.position.get(product, 0),
             }
 
-        basket_mid = sum(pebble_data[product]["mid"] for product in pebble_products)
+        positions = {p: info[p]["position"] for p in self.PEBBLES}
+        avg_position = sum(positions.values()) / len(self.PEBBLES)
 
-        # Positive means the whole basket is expensive.
-        # Negative means the whole basket is cheap.
-        basket_error = basket_mid - BASKET_FAIR
+        basket_mid = sum(info[p]["mid"] for p in self.PEBBLES)
+        basket_error = basket_mid - self.BASKET_FAIR
 
         data["pebbles_basket_error"] = basket_error
+        data["pebbles_avg_position"] = avg_position
 
-        for product in pebble_products:
+        # ============================================================
+        # 1. TRUE PACKAGE TAKE LOGIC
+        # ============================================================
+        # Only cross if the whole 5-product package has edge.
+        # This avoids the old problem where each product counted the full
+        # basket error separately.
 
-            info = pebble_data[product]
-            depth = info["depth"]
+        best_ask_sum = sum(info[p]["best_ask"] for p in self.PEBBLES)
+        best_bid_sum = sum(info[p]["best_bid"] for p in self.PEBBLES)
 
-            best_bid = info["best_bid"]
-            best_ask = info["best_ask"]
+        take_buy_edge = self.BASKET_FAIR - best_ask_sum
+        take_sell_edge = best_bid_sum - self.BASKET_FAIR
 
-            best_bid_volume = info["best_bid_volume"]
-            best_ask_volume = info["best_ask_volume"]
+        buy_room = min(self.LIMIT - positions[p] for p in self.PEBBLES)
+        sell_room = min(self.LIMIT + positions[p] for p in self.PEBBLES)
 
-            mid = info["mid"]
+        max_take_buy_qty = min(
+            self.TAKE_SIZE,
+            buy_room,
+            min(info[p]["best_ask_volume"] for p in self.PEBBLES),
+        )
 
-            position = state.position.get(product, 0)
+        max_take_sell_qty = min(
+            self.TAKE_SIZE,
+            sell_room,
+            min(info[p]["best_bid_volume"] for p in self.PEBBLES),
+        )
 
-            buy_room = LIMIT - position
-            sell_room = LIMIT + position
+        # Buy the full basket only when the full ask package is cheap.
+        if (
+            take_buy_edge >= self.TAKE_EDGE
+            and max_take_buy_qty > 0
+            and avg_position < self.SOFT_LIMIT
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, info[product]["best_ask"], max_take_buy_qty)
+                )
+            return
 
-            # Fair value of this product implied by the other 4 Pebbles.
-            fair = BASKET_FAIR - (basket_mid - mid)
+        # Sell the full basket only when the full bid package is expensive.
+        # This probably triggers rarely, but it is logically correct.
+        if (
+            take_sell_edge >= self.TAKE_EDGE
+            and max_take_sell_qty > 0
+            and avg_position > -self.SOFT_LIMIT
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, info[product]["best_bid"], -max_take_sell_qty)
+                )
+            return
 
-            # If ask is below fair, buying is good.
-            buy_edge = fair - best_ask
+        # ============================================================
+        # 2. PACKAGE PASSIVE QUOTING
+        # ============================================================
+        # Quote all 5 products together with the same size.
+        # This keeps positions balanced and reduces the drawdown risk.
 
-            # If bid is above fair, selling is good.
-            sell_edge = best_bid - fair
+        passive_bid_prices = {}
+        passive_ask_prices = {}
 
-            traded_aggressively = False
+        for product in self.PEBBLES:
+            best_bid = info[product]["best_bid"]
+            best_ask = info[product]["best_ask"]
 
-            # =====================
-            # AGGRESSIVE TAKE LOGIC
-            # =====================
+            bid_price = best_bid + 1
+            ask_price = best_ask - 1
 
-            if buy_edge > TAKE_EDGE and buy_room > 0:
+            # Do not cross accidentally.
+            if bid_price >= best_ask:
+                bid_price = best_bid
 
-                qty = min(
-                    TAKE_SIZE,
-                    best_ask_volume,
-                    buy_room
+            if ask_price <= best_bid:
+                ask_price = best_ask
+
+            passive_bid_prices[product] = bid_price
+            passive_ask_prices[product] = ask_price
+
+        passive_bid_sum = sum(passive_bid_prices[p] for p in self.PEBBLES)
+        passive_ask_sum = sum(passive_ask_prices[p] for p in self.PEBBLES)
+
+        passive_buy_edge = self.BASKET_FAIR - passive_bid_sum
+        passive_sell_edge = passive_ask_sum - self.BASKET_FAIR
+
+        data["pebbles_passive_buy_edge"] = passive_buy_edge
+        data["pebbles_passive_sell_edge"] = passive_sell_edge
+
+        passive_buy_qty = min(self.PASSIVE_SIZE, buy_room)
+        passive_sell_qty = min(self.PASSIVE_SIZE, sell_room)
+
+        # If already long, stop placing more bids unless the buy edge is very good.
+        allow_passive_buy = avg_position < self.SOFT_LIMIT
+
+        # If already short, stop placing more asks unless the sell edge is very good.
+        allow_passive_sell = avg_position > -self.SOFT_LIMIT
+
+        if (
+            passive_buy_edge >= self.PASSIVE_EDGE
+            and passive_buy_qty > 0
+            and allow_passive_buy
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, passive_bid_prices[product], passive_buy_qty)
                 )
 
-                if qty > 0:
-                    result[product].append(Order(product, best_ask, qty))
-                    traded_aggressively = True
-
-            elif sell_edge > TAKE_EDGE and sell_room > 0:
-
-                qty = min(
-                    TAKE_SIZE,
-                    best_bid_volume,
-                    sell_room
+        if (
+            passive_sell_edge >= self.PASSIVE_EDGE
+            and passive_sell_qty > 0
+            and allow_passive_sell
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, passive_ask_prices[product], -passive_sell_qty)
                 )
-
-                if qty > 0:
-                    result[product].append(Order(product, best_bid, -qty))
-                    traded_aggressively = True
-
-            # =====================
-            # PASSIVE QUOTE LOGIC
-            # =====================
-            # Only place passive quotes if we did not already cross the spread.
-            # This prevents us from over-trading in the same tick.
-
-            if traded_aggressively:
-                continue
-
-            adjusted_fair = fair - INVENTORY_SKEW * position
-
-            bid_price = int(round(adjusted_fair - PASSIVE_EDGE))
-            ask_price = int(round(adjusted_fair + PASSIVE_EDGE))
-
-            # Improve the current market by at most 1 tick,
-            # but never cross the spread.
-            bid_price = min(bid_price, best_bid + 1)
-            bid_price = min(bid_price, best_ask - 1)
-
-            ask_price = max(ask_price, best_ask - 1)
-            ask_price = max(ask_price, best_bid + 1)
-
-            if buy_room > 0 and bid_price < best_ask:
-                buy_qty = min(PASSIVE_SIZE, buy_room)
-                result[product].append(Order(product, bid_price, buy_qty))
-
-            if sell_room > 0 and ask_price > best_bid:
-                sell_qty = min(PASSIVE_SIZE, sell_room)
-                result[product].append(Order(product, ask_price, -sell_qty))
