@@ -1,9 +1,12 @@
 from datamodel import OrderDepth, TradingState, Order
 from typing import Dict, List
 import json
+import math
 
 
 class Trader:
+    PRODUCT = "TRANSLATOR_ASTRO_BLACK"
+    LIMIT = 10
 
     def run(self, state: TradingState):
         result = {}
@@ -16,89 +19,119 @@ class Trader:
         except Exception:
             data = {}
 
-        self.trade_translator_space_gray(state, result, data)
+        self.trade_astro_black(state, result, data)
 
         return result, 0, json.dumps(data)
 
-    def trade_translator_space_gray(self, state: TradingState, result: Dict[str, List[Order]], data: dict) -> None:
-        PRODUCT = "TRANSLATOR_SPACE_GRAY"
+    def trade_astro_black(self, state: TradingState, result: Dict[str, List[Order]], data: dict) -> None:
+        product = self.PRODUCT
 
-        if PRODUCT not in state.order_depths:
+        if product not in state.order_depths:
             return
 
-        order_depth: OrderDepth = state.order_depths[PRODUCT]
+        depth: OrderDepth = state.order_depths[product]
 
-        if not order_depth.buy_orders or not order_depth.sell_orders:
+        if not depth.buy_orders or not depth.sell_orders:
             return
 
-        # === Tuned constants ===
-        LIMIT = 10
-        EMA_ALPHA = 0.20
+        best_bid = max(depth.buy_orders.keys())
+        best_ask = min(depth.sell_orders.keys())
 
-        # Only trade when price has moved far away from its short EMA.
-        # This avoids chop and only enters strong trend moves.
-        ENTRY_SIGNAL = 50.0
-
-        # Trade in chunks so reversals are less brutal.
-        MAX_CLIP = 5
-
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-
-        best_bid_volume = order_depth.buy_orders[best_bid]
-        best_ask_volume = -order_depth.sell_orders[best_ask]
+        bid_vol = depth.buy_orders[best_bid]
+        ask_vol = abs(depth.sell_orders[best_ask])
 
         mid = (best_bid + best_ask) / 2
-        position = state.position.get(PRODUCT, 0)
+        spread = best_ask - best_bid
 
-        product_data = data.setdefault(PRODUCT, {})
+        position = state.position.get(product, 0)
 
-        # Reset safely at start or initialise EMA.
-        if "ema" not in product_data or state.timestamp == 0:
-            product_data["ema"] = mid
+        stats = data.setdefault("astro_black", {})
 
-        ema = product_data["ema"]
+        if "fast" not in stats:
+            stats["fast"] = mid
+            stats["slow"] = mid
+            stats["ema"] = mid
+            stats["prev_mid"] = mid
+            stats["vol"] = 0.0
 
-        # Momentum signal: positive means price is strongly above recent fair.
-        signal = mid - ema
+        prev_mid = stats["prev_mid"]
+
+        # Fast/slow EMAs for a small trend-following adjustment.
+        stats["fast"] = 0.75 * stats["fast"] + 0.25 * mid
+        stats["slow"] = 0.97 * stats["slow"] + 0.03 * mid
+        stats["ema"] = 0.95 * stats["ema"] + 0.05 * mid
+
+        recent_move = mid - prev_mid
+        stats["vol"] = 0.95 * stats["vol"] + 0.05 * abs(recent_move)
+        stats["prev_mid"] = mid
+
+        momentum = stats["fast"] - stats["slow"]
+
+        # Keep fair close to current mid. Astro Black trends too much to anchor hard to long EMA.
+        fair = mid + 0.10 * momentum
+
+        # Inventory skew: if long, lower our reservation price to encourage selling.
+        # If short, raise it to encourage buying.
+        reservation_price = fair - 0.50 * position
 
         orders: List[Order] = []
 
-        # Default: keep current position.
-        target_position = position
+        # -------------------------
+        # 1. Take clearly good prices
+        # -------------------------
+        TAKE_EDGE = 7
+        TAKE_SIZE = 3
 
-        # Strong upward momentum -> get long.
-        if signal > ENTRY_SIGNAL:
-            target_position = LIMIT
+        pos_after_take = position
 
-        # Strong downward momentum -> get short.
-        elif signal < -ENTRY_SIGNAL:
-            target_position = -LIMIT
+        if best_ask <= fair - TAKE_EDGE and pos_after_take < self.LIMIT:
+            qty = min(TAKE_SIZE, ask_vol, self.LIMIT - pos_after_take)
+            if qty > 0:
+                orders.append(Order(product, best_ask, qty))
+                pos_after_take += qty
 
-        # Move toward target position by crossing the spread.
-        if position < target_position:
-            buy_qty = min(
-                target_position - position,
-                LIMIT - position,
-                MAX_CLIP,
-                best_ask_volume
-            )
+        if best_bid >= fair + TAKE_EDGE and pos_after_take > -self.LIMIT:
+            qty = min(TAKE_SIZE, bid_vol, self.LIMIT + pos_after_take)
+            if qty > 0:
+                orders.append(Order(product, best_bid, -qty))
+                pos_after_take -= qty
 
-            if buy_qty > 0:
-                orders.append(Order(PRODUCT, best_ask, buy_qty))
+        # -------------------------
+        # 2. Main market-making logic
+        # -------------------------
+        # Historical spread is usually 8-9, so quote when spread is wide enough.
+        MIN_SPREAD = 8
+        QUOTE_EDGE = 1
+        BASE_SIZE = 2
 
-        elif position > target_position:
-            sell_qty = min(
-                position - target_position,
-                LIMIT + position,
-                MAX_CLIP,
-                best_bid_volume
-            )
+        if spread >= MIN_SPREAD:
+            bid_price = min(best_bid, math.floor(reservation_price - QUOTE_EDGE))
+            ask_price = max(best_ask, math.ceil(reservation_price + QUOTE_EDGE))
 
-            if sell_qty > 0:
-                orders.append(Order(PRODUCT, best_bid, -sell_qty))
+            # Safety check: never cross ourselves.
+            if bid_price < ask_price:
+                buy_size = BASE_SIZE
+                sell_size = BASE_SIZE
 
-        # Update EMA after using the current signal.
-        product_data["ema"] = (1 - EMA_ALPHA) * ema + EMA_ALPHA * mid
+                # If inventory is already leaning one way, reduce the order that worsens it.
+                if pos_after_take > 3:
+                    buy_size = 1
+                if pos_after_take < -3:
+                    sell_size = 1
 
-        result[PRODUCT] = orders
+                # Hard stop near the limits.
+                if pos_after_take >= 8:
+                    buy_size = 0
+                if pos_after_take <= -8:
+                    sell_size = 0
+
+                buy_size = min(buy_size, self.LIMIT - pos_after_take)
+                sell_size = min(sell_size, self.LIMIT + pos_after_take)
+
+                if buy_size > 0:
+                    orders.append(Order(product, bid_price, buy_size))
+
+                if sell_size > 0:
+                    orders.append(Order(product, ask_price, -sell_size))
+
+        result[product] = orders
