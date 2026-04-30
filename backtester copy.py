@@ -315,40 +315,24 @@ def save_pnl_graph(pnl_df, output_path=OUTPUT_PNG):
 
 
 class Trader:
-    PRODUCT = "GALAXY_SOUNDS_SOLAR_WINDS"
-
-    LIMIT = 10
-
-    # Trend-following EMAs.
-    # Solar Winds tends to move in chunky directional waves,
-    # so this version only trades when the fast trend separates strongly.
-    FAST_ALPHA = 0.20
-    SLOW_ALPHA = 0.01
-
-    # Higher = fewer trades, safer.
-    # Lower to 120 if this is still too inactive.
-    ENTRY_SIGNAL = 150
-
-    # Max amount to cross per tick.
-    MAX_STEP = 5
-
-    # Avoid weird/wide books.
-    MAX_SPREAD = 18
 
     def run(self, state: TradingState):
-        result = {product: [] for product in state.order_depths}
+        result = {}
 
         try:
             data = json.loads(state.traderData) if state.traderData else {}
-        except Exception:
+        except:
             data = {}
 
-        self.trade_solar_winds(state, result, data)
+        for product in state.order_depths:
+            result[product] = []
+
+        self.trade_sleep_pod_lamb_wool(state, result, data)
 
         return result, 0, json.dumps(data)
 
-    def trade_solar_winds(self, state: TradingState, result: Dict[str, List[Order]], data: dict) -> None:
-        product = self.PRODUCT
+    def trade_sleep_pod_lamb_wool(self, state: TradingState, result: dict, data: dict) -> None:
+        product = "SLEEP_POD_LAMB_WOOL"
 
         if product not in state.order_depths:
             return
@@ -358,68 +342,100 @@ class Trader:
         if not order_depth.buy_orders or not order_depth.sell_orders:
             return
 
-        orders = result[product]
+        orders: List[Order] = []
+
+        position = state.position.get(product, 0)
+
+        LIMIT = 10
+        ORDER_SIZE = 10
+
+        # Momentum parameters
+        FAST_ALPHA = 0.02
+        SLOW_ALPHA = 0.001
+
+        ENTRY_SIGNAL = 100
+        EXIT_SIGNAL = 5
 
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
 
-        if best_bid >= best_ask:
-            return
-
-        spread = best_ask - best_bid
-
-        if spread > self.MAX_SPREAD:
-            return
+        best_bid_volume = order_depth.buy_orders[best_bid]
+        best_ask_volume = -order_depth.sell_orders[best_ask]
 
         mid = (best_bid + best_ask) / 2
 
-        position = state.position.get(product, 0)
+        key = "sleep_pod_lamb_wool"
 
-        memory = data.get(product, {})
+        if key not in data:
+            data[key] = {
+                "fast": mid,
+                "slow": mid
+            }
 
-        fast = memory.get("fast", mid)
-        slow = memory.get("slow", mid)
+        fast = data[key]["fast"]
+        slow = data[key]["slow"]
 
-        # Update EMAs using current mid.
-        fast = self.FAST_ALPHA * mid + (1 - self.FAST_ALPHA) * fast
-        slow = self.SLOW_ALPHA * mid + (1 - self.SLOW_ALPHA) * slow
+        fast = fast + FAST_ALPHA * (mid - fast)
+        slow = slow + SLOW_ALPHA * (mid - slow)
 
         signal = fast - slow
 
-        memory["fast"] = fast
-        memory["slow"] = slow
-        memory["signal"] = signal
-        data[product] = memory
-
-        buy_capacity = self.LIMIT - position
-        sell_capacity = self.LIMIT + position
-
-        best_ask_volume = abs(order_depth.sell_orders[best_ask])
-        best_bid_volume = abs(order_depth.buy_orders[best_bid])
+        data[key]["fast"] = fast
+        data[key]["slow"] = slow
 
         # =========================
-        # AGGRESSIVE TREND FOLLOWING
+        # STRONG UPTREND: BUY
         # =========================
-        #
-        # If fast EMA is far above slow EMA, momentum is up:
-        # buy at the ask.
-        #
-        # If fast EMA is far below slow EMA, momentum is down:
-        # sell at the bid.
-        #
-        # This crosses the spread, so it should actually produce fills.
+        if signal > ENTRY_SIGNAL and position < LIMIT:
+            buy_qty = min(
+                ORDER_SIZE,
+                best_ask_volume,
+                LIMIT - position
+            )
 
-        if signal > self.ENTRY_SIGNAL and buy_capacity > 0:
-            qty = min(self.MAX_STEP, buy_capacity, best_ask_volume)
+            if buy_qty > 0:
+                orders.append(Order(product, best_ask, buy_qty))
 
-            if qty > 0:
-                orders.append(Order(product, best_ask, qty))
+        # =========================
+        # STRONG DOWNTREND: SELL
+        # =========================
+        elif signal < -ENTRY_SIGNAL and position > -LIMIT:
+            sell_qty = min(
+                ORDER_SIZE,
+                best_bid_volume,
+                position + LIMIT
+            )
 
-        elif signal < -self.ENTRY_SIGNAL and sell_capacity > 0:
-            qty = min(self.MAX_STEP, sell_capacity, best_bid_volume)
+            if sell_qty > 0:
+                orders.append(Order(product, best_bid, -sell_qty))
 
-            if qty > 0:
-                orders.append(Order(product, best_bid, -qty))
+        # =========================
+        # EXIT LONG WHEN TREND FADES
+        # =========================
+        elif position > 0 and signal < EXIT_SIGNAL:
+            sell_qty = min(
+                ORDER_SIZE,
+                best_bid_volume,
+                position
+            )
+
+            if sell_qty > 0:
+                orders.append(Order(product, best_bid, -sell_qty))
+
+        # =========================
+        # EXIT SHORT WHEN TREND FADES
+        # =========================
+        elif position < 0 and signal > -EXIT_SIGNAL:
+            buy_qty = min(
+                ORDER_SIZE,
+                best_ask_volume,
+                -position
+            )
+
+            if buy_qty > 0:
+                orders.append(Order(product, best_ask, buy_qty))
+
+        result[product] = orders
 
 
 # ==================================================
