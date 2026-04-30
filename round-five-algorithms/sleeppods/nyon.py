@@ -1,25 +1,26 @@
 from datamodel import OrderDepth, TradingState, Order
-from typing import List
+from typing import Dict, List
 import json
-import math
 
 
 class Trader:
+    PRODUCT = "SLEEP_POD_NYLON"
+    LIMIT = 10
 
     def run(self, state: TradingState):
-        result = {}
-        data = json.loads(state.traderData) if state.traderData else {}
+        result = {product: [] for product in state.order_depths}
 
-        for product in state.order_depths:
-            result[product] = []
+        try:
+            data = json.loads(state.traderData) if state.traderData else {}
+        except Exception:
+            data = {}
 
-        self.trade_sleep_pod_nylon(state, result, data)
+        self.trade_sleep_pod_nylon_v3(state, result, data)
 
         return result, 0, json.dumps(data)
 
-    def trade_sleep_pod_nylon(self, state: TradingState, result: dict, data: dict) -> None:
-        product = "SLEEP_POD_NYLON"
-        LIMIT = 10
+    def trade_sleep_pod_nylon_v3(self, state: TradingState, result: Dict[str, List[Order]], data: dict) -> None:
+        product = self.PRODUCT
 
         if product not in state.order_depths:
             return
@@ -41,112 +42,100 @@ class Trader:
         spread = best_ask - best_bid
         position = state.position.get(product, 0)
 
-        key = "sleep_pod_nylon"
+        key = "nylon_v3_breakout"
 
         if key not in data:
             data[key] = {
-                "fair": mid,
-                "fast": mid,
-                "slow": mid,
+                "mids": [],
+                "entry_price": None,
+                "cooldown": 0,
             }
 
         mem = data[key]
 
-        # Nylon moves directionally, so use adaptive fair value, not fixed fair.
-        mem["fair"] = 0.88 * mem["fair"] + 0.12 * mid
-        mem["fast"] = 0.80 * mem["fast"] + 0.20 * mid
-        mem["slow"] = 0.98 * mem["slow"] + 0.02 * mid
+        mids = mem.get("mids", [])
+        mids.append(mid)
 
-        trend = mem["fast"] - mem["slow"]
+        if len(mids) > 230:
+            mids = mids[-230:]
 
-        total_volume = best_bid_volume + best_ask_volume
+        mem["mids"] = mids
 
-        if total_volume > 0:
-            microprice = (
-                best_ask * best_bid_volume
-                + best_bid * best_ask_volume
-            ) / total_volume
+        if mem.get("cooldown", 0) > 0:
+            mem["cooldown"] -= 1
 
-            imbalance = (
-                best_bid_volume - best_ask_volume
-            ) / total_volume
-        else:
-            microprice = mid
-            imbalance = 0
+        # Not enough history yet.
+        if len(mids) < 205:
+            result[product] = orders
+            return
 
-        fair = mem["fair"]
+        # 200-tick breakout signal.
+        # Nylon is too noisy for short-window signals.
+        momentum_200 = mid - mids[-201]
 
-        # Small fair adjustments.
-        fair += 0.35 * (microprice - mid)
-        fair += 0.08 * trend
-        fair += 1.50 * imbalance
+        # Recent momentum used only as a sanity check.
+        momentum_50 = mid - mids[-51]
 
-        # Inventory skew.
-        # If long, lower fair to encourage selling.
-        # If short, raise fair to encourage buying.
-        fair -= 0.55 * position
+        ENTRY_MOMENTUM = 250
+        EXIT_MOMENTUM = -50
+        STOP_LOSS = 80
 
-        buy_used = 0
-        sell_used = 0
+        MAX_SPREAD = 10
 
-        def virtual_position() -> int:
-            return position + buy_used - sell_used
+        # Track entry price once we actually have a long position.
+        if position > 0 and mem.get("entry_price") is None:
+            mem["entry_price"] = mid
+
+        if position <= 0:
+            mem["entry_price"] = None
+
+        entry_price = mem.get("entry_price")
 
         def buy(price: int, quantity: int) -> None:
-            nonlocal buy_used
-
-            quantity = int(min(quantity, LIMIT - position - buy_used))
+            quantity = int(min(quantity, self.LIMIT - position))
 
             if quantity > 0:
                 orders.append(Order(product, price, quantity))
-                buy_used += quantity
 
         def sell(price: int, quantity: int) -> None:
-            nonlocal sell_used
-
-            quantity = int(min(quantity, LIMIT + position - sell_used))
+            quantity = int(min(quantity, self.LIMIT + position))
 
             if quantity > 0:
                 orders.append(Order(product, price, -quantity))
-                sell_used += quantity
 
-        # Rare aggressive trades only when book is clearly mispriced.
-        TAKE_EDGE = 4
-        TAKE_SIZE = 2
+        # Exit logic first.
+        if position > 0:
+            should_exit = False
 
-        if best_ask <= fair - TAKE_EDGE:
-            buy(best_ask, min(TAKE_SIZE, best_ask_volume))
+            # Breakout failed.
+            if entry_price is not None and mid < entry_price - STOP_LOSS:
+                should_exit = True
+                mem["cooldown"] = 60
 
-        if best_bid >= fair + TAKE_EDGE:
-            sell(best_bid, min(TAKE_SIZE, best_bid_volume))
+            # Long-term momentum died.
+            if momentum_200 < EXIT_MOMENTUM:
+                should_exit = True
 
-        # Inventory cleanup when near limits.
-        if virtual_position() >= 7 and best_bid >= fair - 2:
-            sell(best_bid, min(3, best_bid_volume, virtual_position()))
+            # Short-term dump after entry.
+            if momentum_50 < -120:
+                should_exit = True
+                mem["cooldown"] = 40
 
-        if virtual_position() <= -7 and best_ask <= fair + 2:
-            buy(best_ask, min(3, best_ask_volume, -virtual_position()))
+            if should_exit:
+                sell(best_bid, min(position, best_bid_volume))
+                result[product] = orders
+                return
 
-        # Main strategy: passive spread capture.
-        # Nylon usually has a wide spread, so improve one tick inside if safe.
-        if spread >= 6:
-            PASSIVE_EDGE = 3
-            PASSIVE_SIZE = 3
-
-            raw_bid = math.floor(fair - PASSIVE_EDGE)
-            raw_ask = math.ceil(fair + PASSIVE_EDGE)
-
-            bid_price = min(best_bid + 1, raw_bid)
-            ask_price = max(best_ask - 1, raw_ask)
-
-            # Safety: never cross.
-            bid_price = min(bid_price, best_ask - 1)
-            ask_price = max(ask_price, best_bid + 1)
-
-            if virtual_position() < 8:
-                buy(bid_price, PASSIVE_SIZE)
-
-            if virtual_position() > -8:
-                sell(ask_price, PASSIVE_SIZE)
+        # Entry logic.
+        # V3 only trades strong upside continuation.
+        if (
+            position == 0
+            and mem.get("cooldown", 0) == 0
+            and spread <= MAX_SPREAD
+            and momentum_200 > ENTRY_MOMENTUM
+            and momentum_50 > 20
+        ):
+            buy(best_ask, min(self.LIMIT, best_ask_volume))
+            mem["entry_price"] = mid
 
         result[product] = orders

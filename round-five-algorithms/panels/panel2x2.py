@@ -8,20 +8,29 @@ class Trader:
 
     LIMIT = 10
 
-    # Long rolling fair-value mean reversion
-    WINDOW = 1000
-    WARMUP = 120
+    # Faster fair value than the old 1000-tick rolling mean.
+    FAIR_ALPHA = 2 / (200 + 1)
 
-    # Enter only when price is far from fair.
-    ENTRY_EDGE = 70
+    # Trend EMAs.
+    FAST_ALPHA = 2 / (40 + 1)
+    SLOW_ALPHA = 2 / (220 + 1)
 
-    # Exit when it mean-reverts close to fair.
-    EXIT_EDGE = 3
+    WARMUP = 100
 
-    # Avoid bad/wide books.
+    # Mean reversion only when price is very far from fair.
+    ENTRY_EDGE = 120
+    EXIT_EDGE = 5
+
+    # Strong trend threshold.
+    TREND_EDGE = 160
+    TREND_EXIT = 35
+
+    # Risk control.
+    STOP_LOSS = 180
+    MAX_HOLD = 700
+    COOLDOWN = 35
+
     MAX_SPREAD = 12
-
-    # Max quantity to move per tick.
     MAX_STEP = 10
 
     def run(self, state: TradingState):
@@ -49,57 +58,126 @@ class Trader:
 
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        mid = (best_bid + best_ask) / 2
         spread = best_ask - best_bid
+        mid = (best_bid + best_ask) / 2
 
-        hist_key = product + "_hist"
-        target_key = product + "_target"
+        key = product + "_v2"
+        pdata = data.get(key, {})
 
-        hist = data.get(hist_key, [])
-        hist.append(mid)
+        seen = int(pdata.get("seen", 0))
 
-        if len(hist) > self.WINDOW:
-            hist = hist[-self.WINDOW:]
+        if seen == 0:
+            fair = mid
+            fast = mid
+            slow = mid
+        else:
+            fair = float(pdata.get("fair", mid))
+            fast = float(pdata.get("fast", mid))
+            slow = float(pdata.get("slow", mid))
 
-        data[hist_key] = hist
+            fair += self.FAIR_ALPHA * (mid - fair)
+            fast += self.FAST_ALPHA * (mid - fast)
+            slow += self.SLOW_ALPHA * (mid - slow)
 
-        if len(hist) < self.WARMUP:
-            data[target_key] = 0
-            return
+        seen += 1
 
-        fair = sum(hist) / len(hist)
+        target = int(pdata.get("target", 0))
+        entry_price = pdata.get("entry_price", None)
+        mode = pdata.get("mode", "")
+        hold = int(pdata.get("hold", 0))
+        cooldown = int(pdata.get("cooldown", 0))
+
+        if cooldown > 0:
+            cooldown -= 1
+
+        if target != 0:
+            hold += 1
+        else:
+            hold = 0
+            mode = ""
+
         dev = mid - fair
+        trend = fast - slow
 
-        target = int(data.get(target_key, 0))
+        if seen >= self.WARMUP:
+            exit_now = False
 
-        # Hysteresis target logic:
-        # dev < 0 means price is below fair, so we want to buy.
-        # dev > 0 means price is above fair, so we want to sell.
-        if target == 0:
-            if dev <= -self.ENTRY_EDGE:
-                target = self.LIMIT
-            elif dev >= self.ENTRY_EDGE:
-                target = -self.LIMIT
+            # Risk exits.
+            if target > 0:
+                adverse_move = entry_price - mid if entry_price is not None else 0
 
-        elif target > 0:
-            # Long: exit when price comes back near fair.
-            if dev >= -self.EXIT_EDGE:
+                if adverse_move >= self.STOP_LOSS:
+                    exit_now = True
+                elif hold >= self.MAX_HOLD:
+                    exit_now = True
+                elif mode == "mr" and dev >= -self.EXIT_EDGE:
+                    exit_now = True
+                elif mode == "mr" and trend < -self.TREND_EDGE * 1.25:
+                    exit_now = True
+                elif mode == "trend" and trend < self.TREND_EXIT:
+                    exit_now = True
+
+            elif target < 0:
+                adverse_move = mid - entry_price if entry_price is not None else 0
+
+                if adverse_move >= self.STOP_LOSS:
+                    exit_now = True
+                elif hold >= self.MAX_HOLD:
+                    exit_now = True
+                elif mode == "mr" and dev <= self.EXIT_EDGE:
+                    exit_now = True
+                elif mode == "mr" and trend > self.TREND_EDGE * 1.25:
+                    exit_now = True
+                elif mode == "trend" and trend > -self.TREND_EXIT:
+                    exit_now = True
+
+            if exit_now:
                 target = 0
+                entry_price = None
+                mode = ""
+                hold = 0
+                cooldown = self.COOLDOWN
 
-            # Flip short if it overshoots high.
-            if dev >= self.ENTRY_EDGE:
-                target = -self.LIMIT
+            # Entries.
+            if target == 0 and cooldown <= 0:
+                # Strong uptrend: follow long.
+                if trend >= self.TREND_EDGE and dev > self.EXIT_EDGE:
+                    target = self.LIMIT
+                    entry_price = mid
+                    mode = "trend"
+                    hold = 0
 
-        elif target < 0:
-            # Short: exit when price comes back near fair.
-            if dev <= self.EXIT_EDGE:
-                target = 0
+                # Strong downtrend: follow short.
+                elif trend <= -self.TREND_EDGE and dev < -self.EXIT_EDGE:
+                    target = -self.LIMIT
+                    entry_price = mid
+                    mode = "trend"
+                    hold = 0
 
-            # Flip long if it overshoots low.
-            if dev <= -self.ENTRY_EDGE:
-                target = self.LIMIT
+                # Mean reversion long, but only if trend is not strongly down.
+                elif dev <= -self.ENTRY_EDGE and trend >= -self.TREND_EDGE:
+                    target = self.LIMIT
+                    entry_price = mid
+                    mode = "mr"
+                    hold = 0
 
-        data[target_key] = target
+                # Mean reversion short, but only if trend is not strongly up.
+                elif dev >= self.ENTRY_EDGE and trend <= self.TREND_EDGE:
+                    target = -self.LIMIT
+                    entry_price = mid
+                    mode = "mr"
+                    hold = 0
+
+        pdata["seen"] = seen
+        pdata["fair"] = fair
+        pdata["fast"] = fast
+        pdata["slow"] = slow
+        pdata["target"] = target
+        pdata["entry_price"] = entry_price
+        pdata["mode"] = mode
+        pdata["hold"] = hold
+        pdata["cooldown"] = cooldown
+        data[key] = pdata
 
         if spread > self.MAX_SPREAD:
             return
@@ -127,8 +205,6 @@ class Trader:
 
         for ask_price in sorted(order_depth.sell_orders.keys()):
             ask_volume = order_depth.sell_orders[ask_price]
-
-            # IMC sell volumes are normally negative.
             available = -ask_volume if ask_volume < 0 else ask_volume
 
             qty = min(need, available)
@@ -155,8 +231,6 @@ class Trader:
 
         for bid_price in sorted(order_depth.buy_orders.keys(), reverse=True):
             bid_volume = order_depth.buy_orders[bid_price]
-
-            # IMC buy volumes are normally positive.
             available = bid_volume if bid_volume > 0 else -bid_volume
 
             qty = min(need, available)

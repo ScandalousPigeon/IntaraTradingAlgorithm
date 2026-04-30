@@ -1,5 +1,5 @@
 from datamodel import OrderDepth, TradingState, Order
-from typing import List
+from typing import Dict, List
 import json
 import math
 
@@ -9,24 +9,27 @@ class Trader:
     LIMIT = 10
 
     def run(self, state: TradingState):
-        result = {}
-
-        for product in state.order_depths:
-            result[product] = []
+        result = {product: [] for product in state.order_depths}
 
         try:
             data = json.loads(state.traderData) if state.traderData else {}
         except Exception:
             data = {}
 
-        self.trade_sleep_pod_suede(state, result, data)
+        self.trade_sleep_pod_suede_v2(state, result, data)
 
         return result, 0, json.dumps(data)
 
-    def clamp(self, value: float, low: float, high: float) -> float:
-        return max(low, min(high, value))
+    def clamp(self, x, lo, hi):
+        return max(lo, min(hi, x))
 
-    def trade_sleep_pod_suede(self, state: TradingState, result: dict, data: dict) -> None:
+    def trade_sleep_pod_suede_v2(
+        self,
+        state: TradingState,
+        result: Dict[str, List[Order]],
+        data: dict,
+    ) -> None:
+
         product = self.PRODUCT
 
         if product not in state.order_depths:
@@ -39,115 +42,212 @@ class Trader:
 
         orders: List[Order] = result[product]
 
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders)
+        best_ask = min(order_depth.sell_orders)
 
-        bid_volume = order_depth.buy_orders[best_bid]
-        ask_volume = -order_depth.sell_orders[best_ask]
+        bid_vol = order_depth.buy_orders[best_bid]
+        ask_vol = -order_depth.sell_orders[best_ask]
+
+        if bid_vol <= 0 or ask_vol <= 0:
+            return
 
         mid = (best_bid + best_ask) / 2
-        position = state.position.get(product, 0)
+        spread = best_ask - best_bid
 
-        prefix = "suede_"
+        real_pos = state.position.get(product, 0)
+        sim_pos = real_pos
 
-        if prefix + "fair" not in data:
-            data[prefix + "fair"] = mid
-            data[prefix + "fast"] = mid
-            data[prefix + "slow"] = mid
-            data[prefix + "absret"] = 5.0
-            data[prefix + "last_mid"] = mid
+        k = "suede_v2_"
 
-        fair = float(data[prefix + "fair"])
-        fast = float(data[prefix + "fast"])
-        slow = float(data[prefix + "slow"])
-        absret = float(data[prefix + "absret"])
-        last_mid = float(data[prefix + "last_mid"])
+        # ---------- Approx PnL tracking for safety lock ----------
+        last_pos = int(data.get(k + "last_pos", real_pos))
+        last_mid = float(data.get(k + "last_mid", mid))
+        cash = float(data.get(k + "cash", 0.0))
 
-        # Tuned for SLEEP_POD_SUEDE.
-        FAIR_ALPHA = 0.040
-        FAST_ALPHA = 0.090
-        SLOW_ALPHA = 0.008
+        pos_change = real_pos - last_pos
+        if pos_change != 0:
+            # Approximate fill price. Good enough for profit-lock logic.
+            cash -= pos_change * last_mid
 
-        TREND_WEIGHT = 0.45
-        MAX_TREND_SKEW = 22
+        mtm = cash + real_pos * mid
+        peak = float(data.get(k + "peak", mtm))
+        peak = max(peak, mtm)
 
-        IMBALANCE_WEIGHT = 2.0
-        INVENTORY_SKEW = 1.25
+        locked = bool(data.get(k + "locked", False))
 
-        BASE_TAKE_EDGE = 7
-        BASE_PASSIVE_EDGE = 3
+        PROFIT_LOCK = 1150
+        TRAIL_STOP = 450
+        HARD_STOP = -850
 
-        TAKE_SIZE = 3
-        PASSIVE_SIZE = 2
+        if mtm >= PROFIT_LOCK:
+            locked = True
 
-        # Moving fair value.
-        fair = fair + FAIR_ALPHA * (mid - fair)
+        if peak - mtm >= TRAIL_STOP and peak > 500:
+            locked = True
+
+        if mtm <= HARD_STOP:
+            locked = True
+
+        # If locked, flatten and stop trading the product.
+        if locked:
+            if real_pos > 0:
+                qty = min(real_pos, bid_vol)
+                if qty > 0:
+                    orders.append(Order(product, best_bid, -qty))
+
+            elif real_pos < 0:
+                qty = min(-real_pos, ask_vol)
+                if qty > 0:
+                    orders.append(Order(product, best_ask, qty))
+
+            data[k + "cash"] = cash
+            data[k + "peak"] = peak
+            data[k + "locked"] = locked
+            data[k + "last_pos"] = real_pos
+            data[k + "last_mid"] = mid
+            return
+
+        # ---------- Fast trend model ----------
+        fast = float(data.get(k + "fast", mid))
+        slow = float(data.get(k + "slow", mid))
+        vol = float(data.get(k + "vol", 6.0))
+
+        FAST_ALPHA = 0.18
+        SLOW_ALPHA = 0.025
+
         fast = fast + FAST_ALPHA * (mid - fast)
         slow = slow + SLOW_ALPHA * (mid - slow)
 
-        ret = abs(mid - last_mid)
-        absret = 0.90 * absret + 0.10 * ret
-
         trend = fast - slow
+        vol = 0.88 * vol + 0.12 * abs(mid - last_mid)
 
-        total_volume = bid_volume + ask_volume
-        if total_volume > 0:
-            imbalance = (bid_volume - ask_volume) / total_volume
+        hist = data.get(k + "hist", [])
+        hist.append(mid)
+        if len(hist) > 40:
+            hist = hist[-40:]
+
+        ret_5 = 0
+        ret_15 = 0
+        ret_30 = 0
+
+        if len(hist) > 6:
+            ret_5 = mid - hist[-6]
+        if len(hist) > 16:
+            ret_15 = mid - hist[-16]
+        if len(hist) > 31:
+            ret_30 = mid - hist[-31]
+
+        total_book = bid_vol + ask_vol
+        imbalance = 0
+        if total_book > 0:
+            imbalance = (bid_vol - ask_vol) / total_book
+
+        # ---------- Crash / squeeze filters ----------
+        falling_fast = ret_5 < -30 or ret_15 < -70 or ret_30 < -110
+        rising_fast = ret_5 > 30 or ret_15 > 70 or ret_30 > 110
+
+        # Avoid trading garbage books.
+        if spread > 16:
+            target = 0
         else:
-            imbalance = 0
+            target = 0
 
-        trend_skew = self.clamp(TREND_WEIGHT * trend, -MAX_TREND_SKEW, MAX_TREND_SKEW)
-        imbalance_skew = IMBALANCE_WEIGHT * imbalance
+            if trend > 16 and not falling_fast:
+                target = 6
+            if trend > 28 and not falling_fast:
+                target = 10
 
-        adjusted_fair = fair + trend_skew + imbalance_skew - INVENTORY_SKEW * position
+            if trend < -16 and not rising_fast:
+                target = -6
+            if trend < -28 and not rising_fast:
+                target = -10
 
-        take_edge = BASE_TAKE_EDGE + self.clamp(absret - 6, 0, 4)
-        passive_edge = BASE_PASSIVE_EDGE + self.clamp(absret - 8, 0, 2) * 0.5
+            # Small order-book confirmation.
+            if target > 0 and imbalance < -0.35:
+                target = max(0, target - 4)
+            elif target < 0 and imbalance > 0.35:
+                target = min(0, target + 4)
 
-        can_buy = self.LIMIT - position
-        can_sell = self.LIMIT + position
+        # Emergency: if we are long and price is falling hard, get out.
+        if real_pos > 0 and falling_fast:
+            target = min(target, 0)
 
-        # Aggressive buy if ask is clearly cheap.
-        if can_buy > 0 and best_ask <= adjusted_fair - take_edge:
-            qty = min(can_buy, ask_volume, TAKE_SIZE)
-            if qty > 0:
-                orders.append(Order(product, best_ask, qty))
-                position += qty
-                can_buy -= qty
-                can_sell += qty
+        # Emergency: if we are short and price is rising hard, get out.
+        if real_pos < 0 and rising_fast:
+            target = max(target, 0)
 
-        # Aggressive sell if bid is clearly expensive.
-        if can_sell > 0 and best_bid >= adjusted_fair + take_edge:
-            qty = min(can_sell, bid_volume, TAKE_SIZE)
-            if qty > 0:
+        # Use current mid as fair base. This prevents stale fair-value dip buying.
+        trend_skew = self.clamp(0.45 * trend, -18, 18)
+        imbalance_skew = 2.0 * imbalance
+        inventory_skew = -0.75 * sim_pos
+
+        fair = mid + trend_skew + imbalance_skew + inventory_skew
+
+        TAKE_EDGE = max(8, 6 + 0.35 * vol)
+        PASSIVE_EDGE = 3
+
+        MAX_TAKE = 4
+        MAX_PASSIVE = 2
+        MAX_EXIT = 6
+
+        def buy_capacity():
+            return self.LIMIT - sim_pos
+
+        def sell_capacity():
+            return self.LIMIT + sim_pos
+
+        # ---------- If target is lower than current position, sell / flatten ----------
+        if target < sim_pos:
+            need = sim_pos - target
+            qty = min(need, sell_capacity(), bid_vol, MAX_EXIT)
+
+            # Cross when we are reducing risk or bid is rich.
+            if qty > 0 and (sim_pos > 0 or best_bid >= fair + TAKE_EDGE):
                 orders.append(Order(product, best_bid, -qty))
-                position -= qty
-                can_sell -= qty
-                can_buy += qty
+                sim_pos -= qty
 
-        # Recalculate after possible aggressive trades.
-        adjusted_fair = fair + trend_skew + imbalance_skew - INVENTORY_SKEW * position
+        # ---------- If target is higher than current position, buy / cover ----------
+        if target > sim_pos:
+            need = target - sim_pos
+            qty = min(need, buy_capacity(), ask_vol, MAX_EXIT)
 
-        # Passive buy quote.
-        if can_buy > 0:
-            buy_limit = math.floor(adjusted_fair - passive_edge)
-            buy_price = min(best_bid + 1, best_ask - 1, buy_limit)
+            # Cross when we are reducing risk or ask is cheap.
+            if qty > 0 and (sim_pos < 0 or best_ask <= fair - TAKE_EDGE):
+                orders.append(Order(product, best_ask, qty))
+                sim_pos += qty
 
-            if buy_price >= best_bid - 1:
-                qty = min(can_buy, PASSIVE_SIZE)
-                orders.append(Order(product, int(buy_price), qty))
+        # ---------- Passive one-sided entry only ----------
+        # This avoids the old version constantly quoting both sides and getting trapped.
 
-        # Passive sell quote.
-        if can_sell > 0:
-            sell_limit = math.ceil(adjusted_fair + passive_edge)
-            sell_price = max(best_ask - 1, best_bid + 1, sell_limit)
+        if target > sim_pos and not falling_fast and spread >= 6:
+            need = target - sim_pos
+            qty = min(need, buy_capacity(), MAX_PASSIVE)
 
-            if sell_price <= best_ask + 1:
-                qty = min(can_sell, PASSIVE_SIZE)
-                orders.append(Order(product, int(sell_price), -qty))
+            if qty > 0:
+                buy_price = min(best_bid + 1, best_ask - 1, math.floor(fair - PASSIVE_EDGE))
+                if buy_price > best_bid - 3 and buy_price < best_ask:
+                    orders.append(Order(product, int(buy_price), qty))
+                    sim_pos += qty
 
-        data[prefix + "fair"] = fair
-        data[prefix + "fast"] = fast
-        data[prefix + "slow"] = slow
-        data[prefix + "absret"] = absret
-        data[prefix + "last_mid"] = mid
+        elif target < sim_pos and not rising_fast and spread >= 6:
+            need = sim_pos - target
+            qty = min(need, sell_capacity(), MAX_PASSIVE)
+
+            if qty > 0:
+                sell_price = max(best_ask - 1, best_bid + 1, math.ceil(fair + PASSIVE_EDGE))
+                if sell_price < best_ask + 3 and sell_price > best_bid:
+                    orders.append(Order(product, int(sell_price), -qty))
+                    sim_pos -= qty
+
+        # ---------- Save state ----------
+        data[k + "fast"] = fast
+        data[k + "slow"] = slow
+        data[k + "vol"] = vol
+        data[k + "hist"] = hist
+
+        data[k + "cash"] = cash
+        data[k + "peak"] = peak
+        data[k + "locked"] = locked
+
+        data[k + "last_pos"] = real_pos
+        data[k + "last_mid"] = mid
