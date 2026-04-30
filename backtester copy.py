@@ -1,7 +1,30 @@
 import pandas as pd
 import numpy as np
 import json
+from typing import Dict, List
+from pathlib import Path
+import math
+
+import matplotlib
+matplotlib.use("Agg")  # Linux/headless safe: no GUI window
 import matplotlib.pyplot as plt
+
+
+# ==================================================
+# CONFIG
+# ==================================================
+
+DATA_DIR = Path(
+    "/home/mechanicalpigeon/Documents/Projects/VSCodeProjects/IMCProsperity/historical-csvs/round5"
+)
+
+PRICE_FILES = [
+    "prices_round_5_day_2.csv",
+    "prices_round_5_day_3.csv",
+    "prices_round_5_day_4.csv",
+]
+
+OUTPUT_PNG = "local_backtest_pnl.png"
 
 
 # ==================================================
@@ -46,133 +69,29 @@ class TradingState:
         self.position = position
         self.observations = observations
 
-# ==================================================
-# Put trader code in here !!!!!!
-# ==================================================
-
-
-class Trader:
-
-    def run(self, state: TradingState):
-        result = {}
-        data = json.loads(state.traderData) if state.traderData else {}
-
-        for product in state.order_depths:
-            result[product] = []
-
-        self.trade_black_holes(state, result, data)
-
-        return result, 0, json.dumps(data)
-
-    def trade_black_holes(self, state: TradingState, result: dict, data: dict) -> None:
-        product = "GALAXY_SOUNDS_BLACK_HOLES"
-
-        if product not in state.order_depths:
-            return
-
-        order_depth: OrderDepth = state.order_depths[product]
-
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return
-
-        orders: List[Order] = []
-
-        LIMIT = 10
-
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        mid = (best_bid + best_ask) / 2
-
-        position = state.position.get(product, 0)
-
-        key = "black_holes_state"
-
-        # Reset cleanly at the start of a new simulation/day.
-        if state.timestamp == 0 or key not in data:
-            data[key] = {
-                "fast_ema": mid,
-                "slow_ema": mid,
-                "history": []
-            }
-
-        info = data[key]
-
-        # Parameters tuned for the sample:
-        # Product has strong upward drift, so use slow trend filters.
-        FAST_SPAN = 120
-        SLOW_SPAN = 400
-        MOMENTUM_WINDOW = 80
-
-        fast_alpha = 2 / (FAST_SPAN + 1)
-        slow_alpha = 2 / (SLOW_SPAN + 1)
-
-        info["fast_ema"] = (1 - fast_alpha) * info["fast_ema"] + fast_alpha * mid
-        info["slow_ema"] = (1 - slow_alpha) * info["slow_ema"] + slow_alpha * mid
-
-        history = info.get("history", [])
-        history.append(mid)
-
-        if len(history) > MOMENTUM_WINDOW + 1:
-            history = history[-(MOMENTUM_WINDOW + 1):]
-
-        info["history"] = history
-
-        trend = info["fast_ema"] - info["slow_ema"]
-
-        if len(history) > MOMENTUM_WINDOW:
-            momentum = mid - history[0]
-        else:
-            momentum = 0
-
-        # Default is to be long because Black Holes trends upward strongly.
-        # Only cut exposure if both EMA trend and recent momentum are very negative.
-        if trend < -240 and momentum < -240:
-            target_position = 0
-        elif trend < -120 and momentum < -120:
-            target_position = 5
-        else:
-            target_position = LIMIT
-
-        BUY_SIZE = 5
-        SELL_SIZE = 3
-
-        # Move toward target position.
-        if position < target_position:
-            buy_quantity = min(BUY_SIZE, target_position - position, LIMIT - position)
-
-            if buy_quantity > 0:
-                orders.append(Order(product, best_ask, buy_quantity))
-
-        elif position > target_position:
-            sell_quantity = min(SELL_SIZE, position - target_position, position + LIMIT)
-
-            if sell_quantity > 0:
-                orders.append(Order(product, best_bid, -sell_quantity))
-
-        result[product] = orders
-    
 
 # ==================================================
 # LOAD PRICE DATA
 # ==================================================
 
-import os
+def load_price_data() -> pd.DataFrame:
+    dfs = []
 
-os.chdir(r"C:\Users\oscar\OneDrive\Python\IntaraTradingAlgorithm\historical-csvs\round5")
+    for file_name in PRICE_FILES:
+        path = DATA_DIR / file_name
 
-files = [
-    "prices_round_5_day_2.csv",
-    "prices_round_5_day_3.csv",
-    "prices_round_5_day_4.csv",
-]
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Could not find {path}\n"
+                f"Check DATA_DIR near the top of this file."
+            )
 
+        dfs.append(pd.read_csv(path, sep=";"))
 
-df = pd.concat(
-    [pd.read_csv(f, sep=";") for f in files],
-    ignore_index=True
-)
+    df = pd.concat(dfs, ignore_index=True)
+    df = df.sort_values(["day", "timestamp", "product"])
 
-df = df.sort_values(["day", "timestamp", "product"])
+    return df
 
 
 # ==================================================
@@ -191,14 +110,16 @@ def build_order_depth(row):
         if bid_price_col in row and not pd.isna(row[bid_price_col]):
             price = int(row[bid_price_col])
             volume = int(row[bid_volume_col])
+
             if volume != 0:
                 depth.buy_orders[price] = volume
 
         if ask_price_col in row and not pd.isna(row[ask_price_col]):
             price = int(row[ask_price_col])
             volume = int(row[ask_volume_col])
+
             if volume != 0:
-                # datamodel usually stores sell volumes as negative
+                # IMC datamodel usually stores sell volumes as negative
                 depth.sell_orders[price] = -abs(volume)
 
     return depth
@@ -233,7 +154,6 @@ def execute_orders(orders, order_depths, positions, cash):
     trade_log = []
 
     for product, product_orders in orders.items():
-
         if product not in order_depths:
             continue
 
@@ -249,7 +169,6 @@ def execute_orders(orders, order_depths, positions, cash):
         ask_volume = -depth.sell_orders[best_ask]
 
         for order in product_orders:
-
             qty = order.quantity
             price = order.price
 
@@ -371,29 +290,161 @@ def run_backtest(trader, df):
 
 
 # ==================================================
-# RUN
+# SAVE PNG GRAPH
 # ==================================================
 
-trader = Trader()
+def save_pnl_graph(pnl_df, output_path=OUTPUT_PNG):
+    plt.figure(figsize=(12, 5))
+    plt.plot(pnl_df["pnl"])
+    plt.title("Local Backtest PnL")
+    plt.xlabel("Step")
+    plt.ylabel("PnL")
+    plt.grid(True)
+    plt.tight_layout()
 
-pnl_df, trades_df, final_positions, final_cash = run_backtest(trader, df)
+    plt.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close()
 
-print("Final PnL:", pnl_df["pnl"].iloc[-1])
-print("Final positions:", final_positions)
+    print(f"Saved PnL graph to: {output_path}")
 
-print()
-print("Trades:")
-print(trades_df.head(20))
 
-print()
-print("Trade count by product:")
-if len(trades_df) > 0:
-    print(trades_df.groupby("product").size())
+# ==================================================
+# PASTE THE ALGORITHM YOU WANT TO TEST BELOW
+# Replace this whole Trader class each time.
+# ==================================================
 
-plt.figure(figsize=(12, 5))
-plt.plot(pnl_df["pnl"])
-plt.title("Local Backtest PnL")
-plt.xlabel("Step")
-plt.ylabel("PnL")
-plt.grid(True)
-plt.show()
+
+class Trader:
+    PRODUCT = "GALAXY_SOUNDS_SOLAR_WINDS"
+
+    LIMIT = 10
+
+    # Trend-following EMAs.
+    # Solar Winds tends to move in chunky directional waves,
+    # so this version only trades when the fast trend separates strongly.
+    FAST_ALPHA = 0.20
+    SLOW_ALPHA = 0.01
+
+    # Higher = fewer trades, safer.
+    # Lower to 120 if this is still too inactive.
+    ENTRY_SIGNAL = 150
+
+    # Max amount to cross per tick.
+    MAX_STEP = 5
+
+    # Avoid weird/wide books.
+    MAX_SPREAD = 18
+
+    def run(self, state: TradingState):
+        result = {product: [] for product in state.order_depths}
+
+        try:
+            data = json.loads(state.traderData) if state.traderData else {}
+        except Exception:
+            data = {}
+
+        self.trade_solar_winds(state, result, data)
+
+        return result, 0, json.dumps(data)
+
+    def trade_solar_winds(self, state: TradingState, result: Dict[str, List[Order]], data: dict) -> None:
+        product = self.PRODUCT
+
+        if product not in state.order_depths:
+            return
+
+        order_depth: OrderDepth = state.order_depths[product]
+
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return
+
+        orders = result[product]
+
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+
+        if best_bid >= best_ask:
+            return
+
+        spread = best_ask - best_bid
+
+        if spread > self.MAX_SPREAD:
+            return
+
+        mid = (best_bid + best_ask) / 2
+
+        position = state.position.get(product, 0)
+
+        memory = data.get(product, {})
+
+        fast = memory.get("fast", mid)
+        slow = memory.get("slow", mid)
+
+        # Update EMAs using current mid.
+        fast = self.FAST_ALPHA * mid + (1 - self.FAST_ALPHA) * fast
+        slow = self.SLOW_ALPHA * mid + (1 - self.SLOW_ALPHA) * slow
+
+        signal = fast - slow
+
+        memory["fast"] = fast
+        memory["slow"] = slow
+        memory["signal"] = signal
+        data[product] = memory
+
+        buy_capacity = self.LIMIT - position
+        sell_capacity = self.LIMIT + position
+
+        best_ask_volume = abs(order_depth.sell_orders[best_ask])
+        best_bid_volume = abs(order_depth.buy_orders[best_bid])
+
+        # =========================
+        # AGGRESSIVE TREND FOLLOWING
+        # =========================
+        #
+        # If fast EMA is far above slow EMA, momentum is up:
+        # buy at the ask.
+        #
+        # If fast EMA is far below slow EMA, momentum is down:
+        # sell at the bid.
+        #
+        # This crosses the spread, so it should actually produce fills.
+
+        if signal > self.ENTRY_SIGNAL and buy_capacity > 0:
+            qty = min(self.MAX_STEP, buy_capacity, best_ask_volume)
+
+            if qty > 0:
+                orders.append(Order(product, best_ask, qty))
+
+        elif signal < -self.ENTRY_SIGNAL and sell_capacity > 0:
+            qty = min(self.MAX_STEP, sell_capacity, best_bid_volume)
+
+            if qty > 0:
+                orders.append(Order(product, best_bid, -qty))
+
+
+# ==================================================
+# RUN BACKTEST
+# ==================================================
+
+if __name__ == "__main__":
+    df = load_price_data()
+
+    trader = Trader()
+
+    pnl_df, trades_df, final_positions, final_cash = run_backtest(trader, df)
+
+    print("Final PnL:", pnl_df["pnl"].iloc[-1])
+    print("Final positions:", final_positions)
+
+    print()
+    print("Trades:")
+    print(trades_df.head(20))
+
+    print()
+    print("Trade count by product:")
+    if len(trades_df) > 0:
+        print(trades_df.groupby("product").size())
+    else:
+        print("No trades")
+
+    save_pnl_graph(pnl_df)
