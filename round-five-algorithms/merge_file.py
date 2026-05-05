@@ -1,58 +1,11 @@
-import pandas as pd
-import numpy as np
+from datamodel import OrderDepth, TradingState, Order
+from typing import Dict, List
 import json
-import matplotlib.pyplot as plt
 import math
 
 
-# ==================================================
-# SIMPLE LOCAL DATAMODEL FALLBACK
-# only use this if you are not importing datamodel
-# ==================================================
-
-class Order:
-    def __init__(self, symbol: str, price: int, quantity: int):
-        self.symbol = symbol
-        self.price = price
-        self.quantity = quantity
-
-    def __repr__(self):
-        return f"Order({self.symbol}, {self.price}, {self.quantity})"
-
-
-class OrderDepth:
-    def __init__(self):
-        self.buy_orders = {}
-        self.sell_orders = {}
-
-
-class TradingState:
-    def __init__(
-        self,
-        traderData,
-        timestamp,
-        listings,
-        order_depths,
-        own_trades,
-        market_trades,
-        position,
-        observations
-    ):
-        self.traderData = traderData
-        self.timestamp = timestamp
-        self.listings = listings
-        self.order_depths = order_depths
-        self.own_trades = own_trades
-        self.market_trades = market_trades
-        self.position = position
-        self.observations = observations
-
-# ==================================================
-# Put trader code in here !!!!!!
-# ==================================================
 class Trader:
-    PEBBLES = [
-        "PEBBLES_XS",
+    PEBBLES = ["PEBBLES_XS",
         "PEBBLES_S",
         "PEBBLES_M",
         "PEBBLES_L",
@@ -2718,249 +2671,146 @@ class Trader:
 
     def trade_pebbles(self, state, result, data) -> None:
 
+        info = {}
 
-# ==================================================
-# LOAD PRICE DATA
-# ==================================================
+        # Need all 5 Pebbles visible.
+        for product in self.PEBBLES:
+            if product not in state.order_depths:
+                return
 
-import os
+            depth = state.order_depths[product]
 
-os.chdir(r"C:\Users\oscar\OneDrive\Python\IntaraTradingAlgorithm\historical-csvs\round5")
+            if not depth.buy_orders or not depth.sell_orders:
+                return
 
-files = [
-    "prices_round_5_day_2.csv",
-    "prices_round_5_day_3.csv",
-    "prices_round_5_day_4.csv",
-]
+            best_bid = max(depth.buy_orders.keys())
+            best_ask = min(depth.sell_orders.keys())
 
+            if product not in result:
+                result[product] = []
 
-df = pd.concat(
-    [pd.read_csv(f, sep=";") for f in files],
-    ignore_index=True
-)
+            info[product] = {
+                "depth": depth,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "best_bid_volume": depth.buy_orders[best_bid],
+                "best_ask_volume": -depth.sell_orders[best_ask],
+                "mid": (best_bid + best_ask) / 2,
+                "position": state.position.get(product, 0),
+            }
 
-df = df.sort_values(["day", "timestamp", "product"])
+        positions = {p: info[p]["position"] for p in self.PEBBLES}
+        avg_position = sum(positions.values()) / len(self.PEBBLES)
 
+        basket_mid = sum(info[p]["mid"] for p in self.PEBBLES)
+        basket_error = basket_mid - self.BASKET_FAIR
 
-# ==================================================
-# BUILD ORDER DEPTH FROM ONE TIMESTAMP
-# ==================================================
+        data["pebbles_basket_error"] = basket_error
+        data["pebbles_avg_position"] = avg_position
 
-def build_order_depth(row):
-    depth = OrderDepth()
+        # ============================================================
+        # 1. TRUE PACKAGE TAKE LOGIC
+        # ============================================================
 
-    for level in [1, 2, 3]:
-        bid_price_col = f"bid_price_{level}"
-        bid_volume_col = f"bid_volume_{level}"
-        ask_price_col = f"ask_price_{level}"
-        ask_volume_col = f"ask_volume_{level}"
+        best_ask_sum = sum(info[p]["best_ask"] for p in self.PEBBLES)
+        best_bid_sum = sum(info[p]["best_bid"] for p in self.PEBBLES)
 
-        if bid_price_col in row and not pd.isna(row[bid_price_col]):
-            price = int(row[bid_price_col])
-            volume = int(row[bid_volume_col])
-            if volume != 0:
-                depth.buy_orders[price] = volume
+        take_buy_edge = self.BASKET_FAIR - best_ask_sum
+        take_sell_edge = best_bid_sum - self.BASKET_FAIR
 
-        if ask_price_col in row and not pd.isna(row[ask_price_col]):
-            price = int(row[ask_price_col])
-            volume = int(row[ask_volume_col])
-            if volume != 0:
-                # datamodel usually stores sell volumes as negative
-                depth.sell_orders[price] = -abs(volume)
+        buy_room = min(self.PEBBLES_LIMIT - positions[p] for p in self.PEBBLES)
+        sell_room = min(self.PEBBLES_LIMIT + positions[p] for p in self.PEBBLES)
 
-    return depth
-
-
-def build_state(snapshot, timestamp, positions, trader_data):
-    order_depths = {}
-
-    for _, row in snapshot.iterrows():
-        product = row["product"]
-        order_depths[product] = build_order_depth(row)
-
-    state = TradingState(
-        traderData=trader_data,
-        timestamp=timestamp,
-        listings={},
-        order_depths=order_depths,
-        own_trades={},
-        market_trades={},
-        position=positions.copy(),
-        observations={}
-    )
-
-    return state
-
-
-# ==================================================
-# EXECUTION MODEL
-# ==================================================
-
-def execute_orders(orders, order_depths, positions, cash):
-    trade_log = []
-
-    for product, product_orders in orders.items():
-
-        if product not in order_depths:
-            continue
-
-        depth = order_depths[product]
-
-        if not depth.buy_orders or not depth.sell_orders:
-            continue
-
-        best_bid = max(depth.buy_orders.keys())
-        best_ask = min(depth.sell_orders.keys())
-
-        bid_volume = depth.buy_orders[best_bid]
-        ask_volume = -depth.sell_orders[best_ask]
-
-        for order in product_orders:
-
-            qty = order.quantity
-            price = order.price
-
-            # BUY: only fill if order crosses ask
-            if qty > 0:
-                if price >= best_ask:
-                    fill_qty = min(qty, ask_volume)
-
-                    if fill_qty > 0:
-                        positions[product] = positions.get(product, 0) + fill_qty
-                        cash[product] = cash.get(product, 0) - fill_qty * best_ask
-
-                        trade_log.append({
-                            "product": product,
-                            "side": "BUY",
-                            "price": best_ask,
-                            "qty": fill_qty,
-                        })
-
-            # SELL: only fill if order crosses bid
-            elif qty < 0:
-                sell_qty = -qty
-
-                if price <= best_bid:
-                    fill_qty = min(sell_qty, bid_volume)
-
-                    if fill_qty > 0:
-                        positions[product] = positions.get(product, 0) - fill_qty
-                        cash[product] = cash.get(product, 0) + fill_qty * best_bid
-
-                        trade_log.append({
-                            "product": product,
-                            "side": "SELL",
-                            "price": best_bid,
-                            "qty": fill_qty,
-                        })
-
-    return trade_log
-
-
-# ==================================================
-# MARK TO MARKET
-# ==================================================
-
-def mark_to_market(order_depths, positions, cash):
-    total = 0
-
-    for product in order_depths:
-        depth = order_depths[product]
-
-        if not depth.buy_orders or not depth.sell_orders:
-            continue
-
-        best_bid = max(depth.buy_orders.keys())
-        best_ask = min(depth.sell_orders.keys())
-        mid = (best_bid + best_ask) / 2
-
-        pos = positions.get(product, 0)
-        product_cash = cash.get(product, 0)
-
-        total += product_cash + pos * mid
-
-    return total
-
-
-# ==================================================
-# BACKTEST
-# ==================================================
-
-def run_backtest(trader, df):
-    positions = {}
-    cash = {}
-    trader_data = ""
-
-    pnl_curve = []
-    trade_logs = []
-
-    grouped = df.groupby(["day", "timestamp"], sort=True)
-
-    for (day, timestamp), snapshot in grouped:
-        state = build_state(
-            snapshot=snapshot,
-            timestamp=timestamp,
-            positions=positions,
-            trader_data=trader_data
+        max_take_buy_qty = min(
+            self.TAKE_SIZE,
+            buy_room,
+            min(info[p]["best_ask_volume"] for p in self.PEBBLES),
         )
 
-        result, conversions, trader_data = trader.run(state)
-
-        logs = execute_orders(
-            orders=result,
-            order_depths=state.order_depths,
-            positions=positions,
-            cash=cash
+        max_take_sell_qty = min(
+            self.TAKE_SIZE,
+            sell_room,
+            min(info[p]["best_bid_volume"] for p in self.PEBBLES),
         )
 
-        for log in logs:
-            log["day"] = day
-            log["timestamp"] = timestamp
-            trade_logs.append(log)
+        # Buy full basket only when full ask package is cheap.
+        if (
+            take_buy_edge >= self.TAKE_EDGE
+            and max_take_buy_qty > 0
+            and avg_position < self.SOFT_LIMIT
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, info[product]["best_ask"], max_take_buy_qty)
+                )
+            return
 
-        pnl = mark_to_market(
-            order_depths=state.order_depths,
-            positions=positions,
-            cash=cash
-        )
+        # Sell full basket only when full bid package is expensive.
+        if (
+            take_sell_edge >= self.TAKE_EDGE
+            and max_take_sell_qty > 0
+            and avg_position > -self.SOFT_LIMIT
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, info[product]["best_bid"], -max_take_sell_qty)
+                )
+            return
 
-        pnl_curve.append({
-            "day": day,
-            "timestamp": timestamp,
-            "pnl": pnl,
-            **{f"pos_{p}": positions.get(p, 0) for p in positions}
-        })
+        # ============================================================
+        # 2. PACKAGE PASSIVE QUOTING
+        # ============================================================
 
-    pnl_df = pd.DataFrame(pnl_curve)
-    trades_df = pd.DataFrame(trade_logs)
+        passive_bid_prices = {}
+        passive_ask_prices = {}
 
-    return pnl_df, trades_df, positions, cash
+        for product in self.PEBBLES:
+            best_bid = info[product]["best_bid"]
+            best_ask = info[product]["best_ask"]
 
+            bid_price = best_bid + 1
+            ask_price = best_ask - 1
 
-# ==================================================
-# RUN
-# ==================================================
+            if bid_price >= best_ask:
+                bid_price = best_bid
 
-trader = Trader()
+            if ask_price <= best_bid:
+                ask_price = best_ask
 
-pnl_df, trades_df, final_positions, final_cash = run_backtest(trader, df)
+            passive_bid_prices[product] = bid_price
+            passive_ask_prices[product] = ask_price
 
-print("Final PnL:", pnl_df["pnl"].iloc[-1])
-print("Final positions:", final_positions)
+        passive_bid_sum = sum(passive_bid_prices[p] for p in self.PEBBLES)
+        passive_ask_sum = sum(passive_ask_prices[p] for p in self.PEBBLES)
 
-print()
-print("Trades:")
-print(trades_df.head(20))
+        passive_buy_edge = self.BASKET_FAIR - passive_bid_sum
+        passive_sell_edge = passive_ask_sum - self.BASKET_FAIR
 
-print()
-print("Trade count by product:")
-if len(trades_df) > 0:
-    print(trades_df.groupby("product").size())
+        data["pebbles_passive_buy_edge"] = passive_buy_edge
+        data["pebbles_passive_sell_edge"] = passive_sell_edge
 
-plt.figure(figsize=(12, 5))
-plt.plot(pnl_df["pnl"])
-plt.title("Local Backtest PnL")
-plt.xlabel("Step")
-plt.ylabel("PnL")
-plt.grid(True)
-plt.show()
+        passive_buy_qty = min(self.PASSIVE_SIZE, buy_room)
+        passive_sell_qty = min(self.PASSIVE_SIZE, sell_room)
+
+        allow_passive_buy = avg_position < self.SOFT_LIMIT
+        allow_passive_sell = avg_position > -self.SOFT_LIMIT
+
+        if (
+            passive_buy_edge >= self.PASSIVE_EDGE
+            and passive_buy_qty > 0
+            and allow_passive_buy
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, passive_bid_prices[product], passive_buy_qty)
+                )
+
+        if (
+            passive_sell_edge >= self.PASSIVE_EDGE
+            and passive_sell_qty > 0
+            and allow_passive_sell
+        ):
+            for product in self.PEBBLES:
+                result[product].append(
+                    Order(product, passive_ask_prices[product], -passive_sell_qty)
+                )
